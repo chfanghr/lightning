@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path"
 	"strings"
 	"syscall"
 	"time"
@@ -71,7 +72,11 @@ type Config struct {
 
 	Verbose  bool `json:"verbose,omitempty"`
 	Headless bool `json:"headless,omitempty"`
+
+	UserDataFolder string `json:"user_data_folder,omitempty"`
 }
+
+const DefaultUserDataFolder = "./"
 
 func NewConfigFromFile(filename string) (*Config, error) {
 	content, err := ioutil.ReadFile(filename)
@@ -83,6 +88,9 @@ func NewConfigFromFile(filename string) (*Config, error) {
 		return nil, fmt.Errorf("decoding %v: %w", filename, err)
 	}
 
+	if config.UserDataFolder == "" {
+		config.UserDataFolder = DefaultUserDataFolder
+	}
 	return &config, nil
 }
 
@@ -108,6 +116,8 @@ func NewServiceFromConfig(config *Config, handleSignals bool) (*Service, error) 
 
 	if config.Verbose {
 		s.logger.SetLevel(log.DebugLevel)
+	} else {
+		s.logger.SetLevel(log.InfoLevel)
 	}
 
 	if err := s.setupTgBot(); err != nil {
@@ -129,6 +139,12 @@ func NewServiceFromConfig(config *Config, handleSignals bool) (*Service, error) 
 
 const QQDeviceInformationFilename = "device.json"
 const QQDeviceProtocol = mirai.MacOS
+
+const SendMessageTryLimit = 5
+
+func (s *Service) userDataPath(filename string) string {
+	return path.Join(s.config.UserDataFolder, filename)
+}
 
 func (s *Service) setupTgBot() error {
 
@@ -170,39 +186,41 @@ func (s *Service) setupTgBot() error {
 		return fmt.Errorf("failed to find telegram chat: %w", err)
 	}
 
-	s.tgBot.Handle(tb.OnText, func(m *tb.Message) {
-		if m != nil &&
-			m.Chat.ID == s.config.Telegram.ChatId &&
-			!m.Sender.IsBot {
-			s.logger.Debugf("telegram message: message: %s, sender: %d\n", m.Text, m.Sender.ID)
-			go func() {
-				var groupMessage *miraiMessage.GroupMessage
-				for i := 0; i < 5; i++ {
-					groupMessage = s.qqClient.SendGroupMessage(s.config.QQ.GroupId,
-						&miraiMessage.SendingMessage{Elements: []miraiMessage.IMessageElement{
-							&miraiMessage.TextElement{
-								Content: fmt.Sprintf("forwarded by lightning from telegram: \n%s %s said: %s", m.Sender.FirstName, m.Sender.LastName, m.Text),
-							},
-						}})
-					if groupMessage.Id != -1 {
-						s.logger.Debugf("qq group message sent, id: %v\n", groupMessage.Id)
-						return
-					}
-				}
-				s.logger.Errorf("failed to send qq group message")
-			}()
-
-		}
-	})
+	s.tgBot.Handle(tb.OnText, s.handleTelegramTextMessage)
 
 	return nil
+}
+
+func (s *Service) handleTelegramTextMessage(m *tb.Message) {
+	if m != nil &&
+		m.Chat.ID == s.config.Telegram.ChatId &&
+		!m.Sender.IsBot {
+		s.logger.Debugf("telegram message: message: %s, sender: %d\n", m.Text, m.Sender.ID)
+		go func() {
+			var groupMessage *miraiMessage.GroupMessage
+			for i := 0; i < SendMessageTryLimit; i++ {
+				groupMessage = s.qqClient.SendGroupMessage(s.config.QQ.GroupId,
+					&miraiMessage.SendingMessage{Elements: []miraiMessage.IMessageElement{
+						&miraiMessage.TextElement{
+							Content: fmt.Sprintf("forwarded by lightning from telegram: \n%s %s said: %s", m.Sender.FirstName, m.Sender.LastName, m.Text),
+						},
+					}})
+				if groupMessage.Id != -1 {
+					s.logger.Debugf("qq group message sent, id: %v\n", groupMessage.Id)
+					return
+				}
+			}
+			s.logger.Errorf("failed to send qq group message")
+		}()
+
+	}
 }
 
 func (s *Service) loadQQDeviceInformation() {
 	mirai.SystemDeviceInfo.Protocol = QQDeviceProtocol
 
-	if _, err := os.Stat(QQDeviceInformationFilename); err == nil {
-		if content, err := ioutil.ReadFile(QQDeviceInformationFilename); err == nil {
+	if _, err := os.Stat(s.userDataPath(QQDeviceInformationFilename)); err == nil {
+		if content, err := ioutil.ReadFile(s.userDataPath(QQDeviceInformationFilename)); err == nil {
 			if mirai.SystemDeviceInfo.ReadJson(content) == nil {
 				return
 			}
@@ -210,7 +228,7 @@ func (s *Service) loadQQDeviceInformation() {
 	}
 
 	mirai.GenRandomDevice()
-	err := ioutil.WriteFile(QQDeviceInformationFilename, mirai.SystemDeviceInfo.ToJson(), os.FileMode(0755))
+	err := ioutil.WriteFile(s.userDataPath(QQDeviceInformationFilename), mirai.SystemDeviceInfo.ToJson(), os.FileMode(0755))
 	if err != nil {
 		s.logger.Warningf("failed to presistent device information: %v", err)
 	}
@@ -218,7 +236,7 @@ func (s *Service) loadQQDeviceInformation() {
 }
 
 func (s *Service) loginQQAccountViaQR() error {
-	s.loadQQDeviceInformation()
+	s.qqClient = mirai.NewClientEmpty()
 generateAndPresentQrCode:
 	resp, err := s.qqClient.FetchQRCode()
 	if err != nil {
@@ -329,7 +347,8 @@ func (s *Service) handleQQLoginResponse(loginResp *mirai.LoginResponse) (loginEr
 }
 
 func (s *Service) loginQQAccountUsingPassword() error {
-	s.loadQQDeviceInformation()
+	s.qqClient = mirai.NewClient(s.config.QQ.Account, s.config.QQ.Password)
+
 	loginResp, err := s.qqClient.Login()
 
 	if err != nil {
@@ -341,31 +360,54 @@ func (s *Service) loginQQAccountUsingPassword() error {
 
 const QQSessionTokenFilename = "session.token"
 
-func (s *Service) setupQQClient() error {
-	if _, err := os.Stat(QQSessionTokenFilename); err == nil {
-		sessionTokenData, err := ioutil.ReadFile(QQSessionTokenFilename)
-		if err == nil {
+func (s *Service) loginQQAccountUsingSessionToken() error {
+	shouldRemoveCurrentSessionToken := true
+	defer func() {
+		if shouldRemoveCurrentSessionToken {
+			_ = os.Remove(s.userDataPath(QQSessionTokenFilename))
+		}
+	}()
+
+	if _, err := os.Stat(s.userDataPath(QQSessionTokenFilename)); err == nil {
+		s.logger.Info("session token file found, try login in qq using session token")
+		if sessionTokenData, err := ioutil.ReadFile(s.userDataPath(QQSessionTokenFilename)); err == nil {
 			r := binary.NewReader(sessionTokenData)
 			sessionTokenAccount := r.ReadInt64()
 			if s.config.QQ.Account != 0 && sessionTokenAccount == s.config.QQ.Account {
 				s.qqClient = mirai.NewClientEmpty()
-				err := s.qqClient.TokenLogin(sessionTokenData)
-				if err == nil {
+				if err := s.qqClient.TokenLogin(sessionTokenData); err == nil {
+					s.logger.Infoln("qq login success")
+					shouldRemoveCurrentSessionToken = false
 					return nil
+				} else {
+					s.logger.Warningf("failed to login with session token: %v\n", err)
+					return err
 				}
 			} else {
-				_ = os.Remove(QQSessionTokenFilename)
+				return err
 			}
+		} else {
+			return err
 		}
+	} else {
+		return err
 	}
+}
+
+func (s *Service) setupQQClient() error {
+	s.loadQQDeviceInformation()
 
 	var qqLoginError error
 
+	qqLoginError = s.loginQQAccountUsingSessionToken()
+
+	if qqLoginError == nil {
+		goto loginSuccess
+	}
+
 	if s.config.QQ.LoginViaQrCode {
-		s.qqClient = mirai.NewClientEmpty()
 		qqLoginError = s.loginQQAccountViaQR()
 	} else {
-		s.qqClient = mirai.NewClient(s.config.QQ.Account, s.config.QQ.Password)
 		qqLoginError = s.loginQQAccountUsingPassword()
 	}
 
@@ -373,11 +415,15 @@ func (s *Service) setupQQClient() error {
 		return fmt.Errorf("failed to login qq account: %w", qqLoginError)
 	}
 
+loginSuccess:
 	s.qqClient.OnGroupMessage(s.onQQGroupMessage)
 	s.qqClient.OnLog(s.onQQLog)
 	s.qqClient.OnSelfGroupMessage(s.onQQGroupMessage)
 
-	_ = ioutil.WriteFile(QQSessionTokenFilename, s.qqClient.GenToken(), 0755)
+	if err := ioutil.WriteFile(s.userDataPath(QQSessionTokenFilename), s.qqClient.GenToken(), 0755); err != nil {
+		s.logger.Warningf("failed to write session token: %v", err)
+	}
+
 	return nil
 }
 
@@ -404,10 +450,17 @@ func (s *Service) onQQGroupMessage(client *mirai.QQClient, message *miraiMessage
 		return
 	}
 
-	_, err := s.tgBot.Send(s.tgChat, fmt.Sprintf("forwarded by lighting from qq:\n%s(%s) said %s", message.Sender.CardName, message.Sender.Nickname, message.ToString()))
-	if err != nil {
-		s.logger.Errorf("failed to forward message from qq to telegram: %v", err)
-	}
+	go func() {
+		for i := 0; i < SendMessageTryLimit; i++ {
+			msg, err := s.tgBot.Send(s.tgChat, fmt.Sprintf("forwarded by lighting from qq:\n%s(%s) said %s", message.Sender.CardName, message.Sender.Nickname, message.ToString()))
+			if err != nil {
+				s.logger.Warningf("failed to forward message from qq to telegram: %v", err)
+			} else {
+				s.logger.Debugf("message sent to telegram: %v\n", msg.ID)
+				return
+			}
+		}
+	}()
 }
 
 func (s *Service) Stop() error {
