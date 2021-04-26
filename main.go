@@ -200,7 +200,7 @@ func (s *Service) handleTelegramTextMessage(m *tb.Message) {
 			var groupMessage *miraiMessage.GroupMessage
 			message := &miraiMessage.SendingMessage{Elements: []miraiMessage.IMessageElement{
 				&miraiMessage.TextElement{
-					Content: fmt.Sprintf("forwarded by lightning from telegram: \n%s %s said: %s", m.Sender.FirstName, m.Sender.LastName, m.Text),
+					Content: fmt.Sprintf("\n%s %s(@%s) said: %s", m.Sender.FirstName, m.Sender.LastName, m.Sender.Username, m.Text),
 				},
 			}}
 			for i := 0; i < SendMessageTryLimit; i++ {
@@ -451,7 +451,7 @@ func (s *Service) onQQGroupMessage(client *mirai.QQClient, message *miraiMessage
 	}
 
 	go func() {
-		message := fmt.Sprintf("forwarded by lighting from qq:\n%s(%s) said %s", message.Sender.CardName, message.Sender.Nickname, message.ToString())
+		message := fmt.Sprintf("\n%s(%v) said %s", message.Sender.Nickname, message.Sender.Uin, message.ToString())
 		for i := 0; i < SendMessageTryLimit; i++ {
 			msg, err := s.tgBot.Send(s.tgChat, message)
 			if err != nil {
