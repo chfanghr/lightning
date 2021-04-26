@@ -1,4 +1,4 @@
-module lightning
+module github.com/fanghr/lightning
 
 go 1.16
 
