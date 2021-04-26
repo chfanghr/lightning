@@ -200,7 +200,7 @@ func (s *Service) handleTelegramTextMessage(m *tb.Message) {
 			var groupMessage *miraiMessage.GroupMessage
 			message := &miraiMessage.SendingMessage{Elements: []miraiMessage.IMessageElement{
 				&miraiMessage.TextElement{
-					Content: fmt.Sprintf("%s %s(@%s) said: %s", m.Sender.FirstName, m.Sender.LastName, m.Sender.Username, m.Text),
+					Content: fmt.Sprintf("%s %s(%s) said: %s", m.Sender.FirstName, m.Sender.LastName, m.Sender.Username, m.Text),
 				},
 			}}
 			for i := 0; i < SendMessageTryLimit; i++ {
