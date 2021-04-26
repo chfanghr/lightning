@@ -198,13 +198,13 @@ func (s *Service) handleTelegramTextMessage(m *tb.Message) {
 		s.logger.Debugf("telegram message: message: %s, sender: %d\n", m.Text, m.Sender.ID)
 		go func() {
 			var groupMessage *miraiMessage.GroupMessage
+			message := &miraiMessage.SendingMessage{Elements: []miraiMessage.IMessageElement{
+				&miraiMessage.TextElement{
+					Content: fmt.Sprintf("forwarded by lightning from telegram: \n%s %s said: %s", m.Sender.FirstName, m.Sender.LastName, m.Text),
+				},
+			}}
 			for i := 0; i < SendMessageTryLimit; i++ {
-				groupMessage = s.qqClient.SendGroupMessage(s.config.QQ.GroupId,
-					&miraiMessage.SendingMessage{Elements: []miraiMessage.IMessageElement{
-						&miraiMessage.TextElement{
-							Content: fmt.Sprintf("forwarded by lightning from telegram: \n%s %s said: %s", m.Sender.FirstName, m.Sender.LastName, m.Text),
-						},
-					}})
+				groupMessage = s.qqClient.SendGroupMessage(s.config.QQ.GroupId, message)
 				if groupMessage.Id != -1 {
 					s.logger.Debugf("qq group message sent, id: %v\n", groupMessage.Id)
 					return
@@ -451,8 +451,9 @@ func (s *Service) onQQGroupMessage(client *mirai.QQClient, message *miraiMessage
 	}
 
 	go func() {
+		message := fmt.Sprintf("forwarded by lighting from qq:\n%s(%s) said %s", message.Sender.CardName, message.Sender.Nickname, message.ToString())
 		for i := 0; i < SendMessageTryLimit; i++ {
-			msg, err := s.tgBot.Send(s.tgChat, fmt.Sprintf("forwarded by lighting from qq:\n%s(%s) said %s", message.Sender.CardName, message.Sender.Nickname, message.ToString()))
+			msg, err := s.tgBot.Send(s.tgChat, message)
 			if err != nil {
 				s.logger.Warningf("failed to forward message from qq to telegram: %v", err)
 			} else {
