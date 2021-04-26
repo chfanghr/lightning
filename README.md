@@ -1,4 +1,4 @@
-# lightning
+# lightning [![Go](https://github.com/chfanghr/lightning/actions/workflows/go.yml/badge.svg)](https://github.com/chfanghr/lightning/actions/workflows/go.yml)
 
 This is a ***WIP*** project.
 
