@@ -348,6 +348,7 @@ func (s *Service) setupQQClient() error {
 			r := binary.NewReader(sessionTokenData)
 			sessionTokenAccount := r.ReadInt64()
 			if s.config.QQ.Account != 0 && sessionTokenAccount == s.config.QQ.Account {
+				s.qqClient = mirai.NewClientEmpty()
 				err := s.qqClient.TokenLogin(sessionTokenData)
 				if err == nil {
 					return nil
