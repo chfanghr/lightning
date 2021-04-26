@@ -8,8 +8,9 @@ import (
 	"flag"
 	"fmt"
 	qrcodeTerminal "github.com/Baozisoftware/qrcode-terminal-go"
+	"github.com/Mrs4s/MiraiGo/binary"
 	mirai "github.com/Mrs4s/MiraiGo/client"
-	"github.com/Mrs4s/MiraiGo/message"
+	miraiMessage "github.com/Mrs4s/MiraiGo/message"
 	log "github.com/sirupsen/logrus"
 	"github.com/tuotoo/qrcode"
 	asciiArt "github.com/yinghau76/go-ascii-art"
@@ -175,11 +176,11 @@ func (s *Service) setupTgBot() error {
 			!m.Sender.IsBot {
 			s.logger.Debugf("telegram message: message: %s, sender: %d\n", m.Text, m.Sender.ID)
 			go func() {
-				var groupMessage *message.GroupMessage
+				var groupMessage *miraiMessage.GroupMessage
 				for i := 0; i < 5; i++ {
 					groupMessage = s.qqClient.SendGroupMessage(s.config.QQ.GroupId,
-						&message.SendingMessage{Elements: []message.IMessageElement{
-							&message.TextElement{
+						&miraiMessage.SendingMessage{Elements: []miraiMessage.IMessageElement{
+							&miraiMessage.TextElement{
 								Content: fmt.Sprintf("forwarded by lightning from telegram: \n%s %s said: %s", m.Sender.FirstName, m.Sender.LastName, m.Text),
 							},
 						}})
@@ -338,7 +339,25 @@ func (s *Service) loginQQAccountUsingPassword() error {
 	return s.handleQQLoginResponse(loginResp)
 }
 
+const QQSessionTokenFilename = "session.token"
+
 func (s *Service) setupQQClient() error {
+	if _, err := os.Stat(QQSessionTokenFilename); err == nil {
+		sessionTokenData, err := ioutil.ReadFile(QQSessionTokenFilename)
+		if err == nil {
+			r := binary.NewReader(sessionTokenData)
+			sessionTokenAccount := r.ReadInt64()
+			if s.config.QQ.Account != 0 && sessionTokenAccount == s.config.QQ.Account {
+				err := s.qqClient.TokenLogin(sessionTokenData)
+				if err == nil {
+					return nil
+				}
+			} else {
+				_ = os.Remove(QQSessionTokenFilename)
+			}
+		}
+	}
+
 	var qqLoginError error
 
 	if s.config.QQ.LoginViaQrCode {
@@ -357,6 +376,7 @@ func (s *Service) setupQQClient() error {
 	s.qqClient.OnLog(s.onQQLog)
 	s.qqClient.OnSelfGroupMessage(s.onQQGroupMessage)
 
+	_ = ioutil.WriteFile(QQSessionTokenFilename, s.qqClient.GenToken(), 0755)
 	return nil
 }
 
@@ -376,7 +396,7 @@ func (s *Service) onQQLog(client *mirai.QQClient, e *mirai.LogEvent) {
 	s.logger.Logf(logLevel, "qq client: %v\n", e.Message)
 }
 
-func (s *Service) onQQGroupMessage(client *mirai.QQClient, message *message.GroupMessage) {
+func (s *Service) onQQGroupMessage(client *mirai.QQClient, message *miraiMessage.GroupMessage) {
 	precondition(s.qqClient == client)
 	s.logger.Debugf("qq group message: %v", message.ToString())
 	if message.GroupCode != s.config.QQ.GroupId || message.Sender.Uin == s.qqClient.Uin {
