@@ -1,0 +1,15 @@
+{
+  "qq": {
+    "account": <your qq account, optional>,
+    "password": <your qq password, optional>,
+    "login_via_qr_code": <whether use qr to login or not, a boolean, optional>,
+    "group_id": <your qq group chat id, an integer>
+  },
+  "telegram": {
+    "bot_token": <your telegram bot token, a string>,
+    "chat_id": <your telegram group chat id, an integer>,
+    "my_id": <your telegram id, an integer>
+  },
+  "verbose": <whether enable verbose output or not, a boolean>,
+  "headless": <whether you are running this application on a headless device or not, a boolean>
+}
