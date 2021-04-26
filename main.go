@@ -49,6 +49,11 @@ func preconditionNoError(err error) {
 //	panic("precondition failure")
 //}
 
+func isFileOrFolderExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil || os.IsExist(err)
+}
+
 type Config struct {
 	QQ struct {
 		LoginViaQrCode bool   `json:"login_via_qr_code,omitempty"`
@@ -76,7 +81,7 @@ type Config struct {
 	UserDataFolder string `json:"user_data_folder,omitempty"`
 }
 
-const DefaultUserDataFolder = "./"
+const DefaultUserDataFolder = "./userdata"
 
 func NewConfigFromFile(filename string) (*Config, error) {
 	content, err := ioutil.ReadFile(filename)
@@ -120,11 +125,16 @@ func NewServiceFromConfig(config *Config, handleSignals bool) (*Service, error) 
 		s.logger.SetLevel(log.InfoLevel)
 	}
 
-	if err := s.setupTgBot(); err != nil {
+	s.logger.Infoln("constructing service")
+
+	if err := s.makeUserDataDirectoryIfNeeded(); err != nil {
 		return nil, err
 	}
 
-	if err := s.setupQQClient(); err != nil {
+	if err := s.reportIfError(s.setupTgBot()); err != nil {
+		return nil, err
+	}
+	if err := s.reportIfError(s.setupQQClient()); err != nil {
 		return nil, err
 	}
 
@@ -137,6 +147,23 @@ func NewServiceFromConfig(config *Config, handleSignals bool) (*Service, error) 
 	return s, nil
 }
 
+func (s *Service) makeUserDataDirectoryIfNeeded() error {
+	if !isFileOrFolderExists(s.config.UserDataFolder) {
+		s.logger.Infoln("user data folder does not exist, creating it")
+		if err := os.Mkdir(s.config.UserDataFolder, 0700); err != nil {
+			return s.reportIfError(fmt.Errorf("failed to create userdata directory: %w", err))
+		}
+	}
+	return nil
+}
+
+func (s *Service) reportIfError(err error) error {
+	if err != nil {
+		s.logger.Errorln(err)
+	}
+	return err
+}
+
 const QQDeviceInformationFilename = "device.json"
 const QQDeviceProtocol = mirai.MacOS
 
@@ -147,13 +174,15 @@ func (s *Service) userDataPath(filename string) string {
 }
 
 func (s *Service) setupTgBot() error {
+	s.logger.Infoln("creating telegram bot")
 
 	var tgBotHttpClient *http.Client
 
 	if s.config.Network.Proxy != "" {
+		s.logger.Infof("using proxy: %v", s.config.Network.Proxy)
 		proxyUrl, err := url.Parse(s.config.Network.Proxy)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to parse proxy url: %w", err)
 		}
 		tgBotHttpClient = &http.Client{
 			Transport: &http.Transport{
@@ -181,10 +210,14 @@ func (s *Service) setupTgBot() error {
 		return fmt.Errorf("failed to create telegram bot: %w", err)
 	}
 
+	s.logger.Infoln("telegram bot created")
+
 	s.tgChat, err = s.tgBot.ChatByID(fmt.Sprintf("%v", s.config.Telegram.ChatId))
 	if err != nil {
 		return fmt.Errorf("failed to find telegram chat: %w", err)
 	}
+
+	s.logger.Infof("telegram chat found: %s(%v)\n", s.tgChat.Title, s.tgChat.ID)
 
 	s.tgBot.Handle(tb.OnText, s.handleTelegramTextMessage)
 
@@ -195,7 +228,7 @@ func (s *Service) handleTelegramTextMessage(m *tb.Message) {
 	if m != nil &&
 		m.Chat.ID == s.config.Telegram.ChatId &&
 		!m.Sender.IsBot {
-		s.logger.Debugf("telegram message: message: %s, sender: %d\n", m.Text, m.Sender.ID)
+		s.logger.Infof("telegram message received: %v\n", m.ID)
 		go func() {
 			var groupMessage *miraiMessage.GroupMessage
 			message := &miraiMessage.SendingMessage{Elements: []miraiMessage.IMessageElement{
@@ -206,7 +239,7 @@ func (s *Service) handleTelegramTextMessage(m *tb.Message) {
 			for i := 0; i < SendMessageTryLimit; i++ {
 				groupMessage = s.qqClient.SendGroupMessage(s.config.QQ.GroupId, message)
 				if groupMessage.Id != -1 {
-					s.logger.Debugf("qq group message sent, id: %v\n", groupMessage.Id)
+					s.logger.Infof("qq group message sent, id: %v\n", groupMessage.Id)
 					return
 				}
 			}
@@ -219,7 +252,7 @@ func (s *Service) handleTelegramTextMessage(m *tb.Message) {
 func (s *Service) loadQQDeviceInformation() {
 	mirai.SystemDeviceInfo.Protocol = QQDeviceProtocol
 
-	if _, err := os.Stat(s.userDataPath(QQDeviceInformationFilename)); err == nil {
+	if isFileOrFolderExists(s.userDataPath(QQDeviceInformationFilename)) {
 		if content, err := ioutil.ReadFile(s.userDataPath(QQDeviceInformationFilename)); err == nil {
 			if mirai.SystemDeviceInfo.ReadJson(content) == nil {
 				return
@@ -228,9 +261,9 @@ func (s *Service) loadQQDeviceInformation() {
 	}
 
 	mirai.GenRandomDevice()
-	err := ioutil.WriteFile(s.userDataPath(QQDeviceInformationFilename), mirai.SystemDeviceInfo.ToJson(), os.FileMode(0755))
+	err := ioutil.WriteFile(s.userDataPath(QQDeviceInformationFilename), mirai.SystemDeviceInfo.ToJson(), 0600)
 	if err != nil {
-		s.logger.Warningf("failed to presistent device information: %v", err)
+		s.logger.Warningf("failed to presist device information: %v", err)
 	}
 	return
 }
@@ -244,7 +277,7 @@ generateAndPresentQrCode:
 	}
 
 	loginQr, err := qrcode.Decode(bytes.NewReader(resp.ImageData))
-	preconditionWithMessage(err == nil, "decoding login qr code")
+	preconditionWithMessage(err == nil, "failed to login qr code")
 
 	fmt.Println()
 	fmt.Println("Scan this qr code to login on mobile qq app:")
@@ -258,7 +291,7 @@ generateAndPresentQrCode:
 		qrStatus, err := s.qqClient.QueryQRCodeStatus(resp.Sig)
 
 		if err != nil {
-			return fmt.Errorf("failed to query code ststus: %w", err)
+			return fmt.Errorf("failed to query qr code ststus: %w", err)
 		}
 
 		if qrStatus == nil {
@@ -368,7 +401,7 @@ func (s *Service) loginQQAccountUsingSessionToken() error {
 		}
 	}()
 
-	if _, err := os.Stat(s.userDataPath(QQSessionTokenFilename)); err == nil {
+	if isFileOrFolderExists(s.userDataPath(QQSessionTokenFilename)) {
 		s.logger.Info("session token file found, try login in qq using session token")
 		if sessionTokenData, err := ioutil.ReadFile(s.userDataPath(QQSessionTokenFilename)); err == nil {
 			r := binary.NewReader(sessionTokenData)
@@ -390,7 +423,7 @@ func (s *Service) loginQQAccountUsingSessionToken() error {
 			return err
 		}
 	} else {
-		return err
+		return fmt.Errorf("session token does not exist")
 	}
 }
 
@@ -398,6 +431,8 @@ func (s *Service) setupQQClient() error {
 	s.loadQQDeviceInformation()
 
 	var qqLoginError error
+
+	s.logger.Info("login qq account")
 
 	qqLoginError = s.loginQQAccountUsingSessionToken()
 
@@ -416,18 +451,18 @@ func (s *Service) setupQQClient() error {
 	}
 
 loginSuccess:
-	s.qqClient.OnGroupMessage(s.onQQGroupMessage)
-	s.qqClient.OnLog(s.onQQLog)
-	s.qqClient.OnSelfGroupMessage(s.onQQGroupMessage)
+	s.qqClient.OnGroupMessage(s.handleQQGroupMessage)
+	s.qqClient.OnLog(s.handleQQLog)
+	s.qqClient.OnSelfGroupMessage(s.handleQQGroupMessage)
 
-	if err := ioutil.WriteFile(s.userDataPath(QQSessionTokenFilename), s.qqClient.GenToken(), 0755); err != nil {
-		s.logger.Warningf("failed to write session token: %v", err)
+	if err := ioutil.WriteFile(s.userDataPath(QQSessionTokenFilename), s.qqClient.GenToken(), 0600); err != nil {
+		s.logger.Warningf("failed to persist session token: %v", err)
 	}
 
 	return nil
 }
 
-func (s *Service) onQQLog(client *mirai.QQClient, e *mirai.LogEvent) {
+func (s *Service) handleQQLog(client *mirai.QQClient, e *mirai.LogEvent) {
 	precondition(client == s.qqClient)
 	var logLevel log.Level
 
@@ -443,21 +478,21 @@ func (s *Service) onQQLog(client *mirai.QQClient, e *mirai.LogEvent) {
 	s.logger.Logf(logLevel, "qq client: %v\n", e.Message)
 }
 
-func (s *Service) onQQGroupMessage(client *mirai.QQClient, message *miraiMessage.GroupMessage) {
+func (s *Service) handleQQGroupMessage(client *mirai.QQClient, message *miraiMessage.GroupMessage) {
 	precondition(s.qqClient == client)
-	s.logger.Debugf("qq group message: %v", message.ToString())
-	if message.GroupCode != s.config.QQ.GroupId || message.Sender.Uin == s.qqClient.Uin {
+	s.logger.Infof("qq group message received: %v\n", message.Id)
+	if message.GroupCode != s.config.QQ.GroupId /*|| message.Sender.Uin == s.qqClient.Uin*/ {
 		return
 	}
 
 	go func() {
-		message := fmt.Sprintf("%s(%v) said %s", message.Sender.Nickname, message.Sender.Uin, message.ToString())
+		message := fmt.Sprintf("%s(%v) said: %s", message.Sender.Nickname, message.Sender.Uin, message.ToString())
 		for i := 0; i < SendMessageTryLimit; i++ {
 			msg, err := s.tgBot.Send(s.tgChat, message)
 			if err != nil {
 				s.logger.Warningf("failed to forward message from qq to telegram: %v", err)
 			} else {
-				s.logger.Debugf("message sent to telegram: %v\n", msg.ID)
+				s.logger.Infof("message sent to telegram: %v\n", msg.ID)
 				return
 			}
 		}
@@ -470,22 +505,29 @@ func (s *Service) Stop() error {
 	s.tgBot.Stop()
 	s.qqClient.Disconnect()
 
+	s.logger.Infoln("service stopped")
+
 	return nil
 }
 
 func (s *Service) Run() {
 	s.tgBot.Start()
+
+	s.logger.Infoln("service running")
 	<-s.context.Done()
 }
 
+var exitSignalList = []os.Signal{syscall.SIGKILL, syscall.SIGABRT, syscall.SIGINT, syscall.SIGTERM}
+
 func (s *Service) handleSignals() {
 	signalChannel := make(chan os.Signal)
-	signal.Notify(signalChannel, syscall.SIGKILL, syscall.SIGABRT, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(signalChannel, exitSignalList...)
 
 	go func() {
 		for {
 			select {
-			case <-signalChannel:
+			case sig := <-signalChannel:
+				s.logger.Infof("exit signal received: %v\n", sig)
 				_ = s.Stop()
 				return
 			case <-s.context.Done():
