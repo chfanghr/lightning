@@ -5,5 +5,6 @@ services:
     build: ./
     image: lightning
     volumes:
-      - "./config.json:/userdata/config.json"
+      - "./config.json:/config.json"
+      - "./userdata:/userdata"
     restart: always
