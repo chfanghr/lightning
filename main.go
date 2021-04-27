@@ -11,6 +11,7 @@ import (
 	"github.com/Mrs4s/MiraiGo/binary"
 	mirai "github.com/Mrs4s/MiraiGo/client"
 	miraiMessage "github.com/Mrs4s/MiraiGo/message"
+	"github.com/go-redis/redis/v8"
 	log "github.com/sirupsen/logrus"
 	"github.com/tuotoo/qrcode"
 	asciiArt "github.com/yinghau76/go-ascii-art"
@@ -24,6 +25,7 @@ import (
 	"os/signal"
 	"path"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -46,9 +48,9 @@ func preconditionNoError(err error) {
 	}
 }
 
-//func preconditionFailure() {
-//	panic("precondition failure")
-//}
+func preconditionFailureWithMessage(message string) {
+	panic(fmt.Sprintf("precondition failure: %s", message))
+}
 
 func isFileOrFolderExists(path string) bool {
 	_, err := os.Stat(path)
@@ -76,7 +78,20 @@ type Config struct {
 		Proxy string `json:"proxy,omitempty"`
 	} `json:"network,omitempty"`
 
-	Verbose  bool `json:"verbose,omitempty"`
+	Debug struct {
+		Verbose              bool `json:"verbose,omitempty"`
+		QQDontFilterYourself bool `json:"qq_dont_filter_yourself"`
+	} `json:"debug"`
+
+	Redis struct {
+		Url string `json:"redis_url,omitempty"`
+
+		Address  string `json:"address,omitempty"`
+		DB       int    `json:"db,omitempty"`
+		Username string `json:"username,omitempty"`
+		Password string `json:"password,omitempty"`
+	} `json:"redis,omitempty"`
+
 	Headless bool `json:"headless,omitempty"`
 
 	UserDataFolder string `json:"user_data_folder,omitempty"`
@@ -103,15 +118,26 @@ func NewConfigFromFile(filename string) (*Config, error) {
 type Service struct {
 	config *Config
 
-	tgBot    *tb.Bot
-	qqClient *mirai.QQClient
+	telegramBot *tb.Bot
+	qqClient    *mirai.QQClient
 
 	logger *log.Logger
 
 	context    context.Context
 	cancelFunc context.CancelFunc
 
-	tgChat *tb.Chat
+	telegramChat *tb.Chat
+
+	qqToSendMessageChannel chan *qqToSendMessage
+
+	workerWaitGroup sync.WaitGroup
+
+	redisClient *redis.Client
+}
+
+type qqToSendMessage struct {
+	originalTelegramMessageId int
+	toSend                    *miraiMessage.SendingMessage
 }
 
 func NewServiceFromConfig(config *Config, handleSignals bool) (*Service, error) {
@@ -120,7 +146,7 @@ func NewServiceFromConfig(config *Config, handleSignals bool) (*Service, error) 
 		logger: log.New(),
 	}
 
-	if config.Verbose {
+	if config.Debug.Verbose {
 		s.logger.SetLevel(log.DebugLevel)
 	} else {
 		s.logger.SetLevel(log.InfoLevel)
@@ -145,7 +171,74 @@ func NewServiceFromConfig(config *Config, handleSignals bool) (*Service, error) 
 		s.handleSignals()
 	}
 
+	s.qqToSendMessageChannel = make(chan *qqToSendMessage, 100)
+
+	if err := s.setupRedisDatabase(); err != nil {
+		s.redisClient = nil
+		log.Warningf("failed to setup redis: %v", err)
+	}
+
 	return s, nil
+}
+
+func (s *Service) setupRedisDatabase() (err error) {
+	var options *redis.Options
+
+	if s.config.Redis.Url != "" {
+		options, err = redis.ParseURL(s.config.Redis.Url)
+		if err != nil {
+			return fmt.Errorf("parse redis url: %w", err)
+		}
+	} else if s.config.Redis.Address != "" {
+		options = &redis.Options{
+			Username: s.config.Redis.Username,
+			Password: s.config.Redis.Password,
+			Addr:     s.config.Redis.Address,
+			DB:       s.config.Redis.DB,
+		}
+	} else {
+		return fmt.Errorf("no redis configuration given")
+	}
+
+	s.redisClient = redis.NewClient(options)
+
+	serverInfo, err := s.redisClient.Do(s.redisClient.Context(), "INFO").Result()
+	if err != nil {
+		return fmt.Errorf("failed to get redis server information: %w", err)
+	}
+	log.Infof("redis server connected: %v", serverInfo.(string))
+	return nil
+}
+
+func (s *Service) qqMessageSender() {
+	sendMessage := func(toSend *qqToSendMessage) {
+		var groupMessage *miraiMessage.GroupMessage
+
+		for i := 0; i < SendMessageTryLimit; i++ {
+			groupMessage = s.qqClient.SendGroupMessage(s.config.QQ.GroupId, toSend.toSend)
+			if groupMessage == nil || groupMessage.Id == -1 {
+				s.logger.Warningf("failed to send ")
+				time.Sleep(time.Second)
+			} else {
+				break
+			}
+		}
+
+	}
+
+	for {
+		select {
+		case <-s.context.Done():
+			for msg := range s.qqToSendMessageChannel {
+				sendMessage(msg)
+			}
+			close(s.qqToSendMessageChannel)
+			s.workerWaitGroup.Done()
+			return
+		case msg := <-s.qqToSendMessageChannel:
+			sendMessage(msg)
+		}
+	}
 }
 
 func (s *Service) makeUserDataDirectoryIfNeeded() error {
@@ -168,7 +261,7 @@ func (s *Service) reportIfError(err error) error {
 const QQDeviceInformationFilename = "device.json"
 const QQDeviceProtocol = mirai.MacOS
 
-const SendMessageTryLimit = 5
+const SendMessageTryLimit = 10
 
 func (s *Service) userDataPath(filename string) string {
 	return path.Join(s.config.UserDataFolder, filename)
@@ -194,7 +287,7 @@ func (s *Service) setupTelegramBot() error {
 
 	var err error
 
-	s.tgBot, err = tb.NewBot(tb.Settings{
+	s.telegramBot, err = tb.NewBot(tb.Settings{
 		Token: s.config.Telegram.BotToken,
 		Poller: &tb.LongPoller{
 			Limit:   10,
@@ -204,7 +297,7 @@ func (s *Service) setupTelegramBot() error {
 				"edited_message",
 			},
 		},
-		Verbose: s.config.Verbose,
+		Verbose: s.config.Debug.Verbose,
 		Client:  tgBotHttpClient,
 		Reporter: func(err error) {
 			s.logger.Errorf("telebot: %v", err)
@@ -217,15 +310,15 @@ func (s *Service) setupTelegramBot() error {
 
 	s.logger.Infoln("telegram bot created")
 
-	s.tgChat, err = s.tgBot.ChatByID(fmt.Sprintf("%v", s.config.Telegram.ChatId))
+	s.telegramChat, err = s.telegramBot.ChatByID(fmt.Sprintf("%v", s.config.Telegram.ChatId))
 	if err != nil {
 		return fmt.Errorf("failed to find telegram chat: %w", err)
 	}
 
-	s.logger.Infof("telegram chat found: %s(%v)\n", s.tgChat.Title, s.tgChat.ID)
+	s.logger.Infof("telegram chat found: %s(%v)\n", s.telegramChat.Title, s.telegramChat.ID)
 
-	s.tgBot.Handle(tb.OnText, s.handleTelegramTextMessage)
-	s.tgBot.Handle(tb.OnPhoto, s.handleTelegramImageMessage)
+	s.telegramBot.Handle(tb.OnText, s.handleTelegramTextMessage)
+	s.telegramBot.Handle(tb.OnPhoto, s.handleTelegramImageMessage)
 
 	return nil
 }
@@ -244,8 +337,8 @@ func (s *Service) handleTelegramTextMessage(m *tb.Message) {
 		go func() {
 			var groupMessage *miraiMessage.GroupMessage
 			message := miraiMessage.NewSendingMessage()
-			message.Append(miraiMessage.NewText(makeTelegramToQQMessageHeader(m)))
-			message.Append(miraiMessage.NewText(m.Text))
+			message.Append(miraiMessage.NewText(makeTelegramToQQMessageHeader(m) + m.Text))
+			//message.Append(miraiMessage.NewText(m.Text))
 			for i := 0; i < SendMessageTryLimit; i++ {
 				groupMessage = s.qqClient.SendGroupMessage(s.config.QQ.GroupId, message)
 				if groupMessage.Id != -1 {
@@ -263,7 +356,7 @@ func (s *Service) handleTelegramImageMessage(m *tb.Message) {
 		!m.Sender.IsBot {
 		s.logger.Infof("telegram message received: %v\n", m.ID)
 		go func() {
-			reader, err := s.tgBot.GetFile(m.Photo.MediaFile())
+			reader, err := s.telegramBot.GetFile(m.Photo.MediaFile())
 			if err != nil {
 				s.logger.Errorf("failed to download telegram photo: %v\n", err)
 				return
@@ -509,7 +602,19 @@ loginSuccess:
 	s.logger.Infof("qq login success: %s(%v)\n", s.qqClient.Nickname, s.qqClient.Uin)
 
 	s.qqClient.OnGroupMessage(s.handleQQGroupMessage)
+	if s.config.Debug.QQDontFilterYourself {
+		s.qqClient.OnSelfGroupMessage(s.handleQQGroupMessage)
+	}
 	s.qqClient.OnLog(s.handleQQLog)
+	s.qqClient.OnGroupMessageRecalled(func(client *mirai.QQClient, event *mirai.GroupMessageRecalledEvent) {
+		precondition(client == s.qqClient)
+
+		if event.GroupCode != s.config.QQ.GroupId {
+			return
+		}
+
+		s.logger.Debugf("qq message recalled: %v\n", event.MessageId)
+	})
 
 	if err := ioutil.WriteFile(s.userDataPath(QQSessionTokenFilename), s.qqClient.GenToken(), 0600); err != nil {
 		s.logger.Warningf("failed to persist session token: %v", err)
@@ -534,31 +639,97 @@ func (s *Service) handleQQLog(client *mirai.QQClient, e *mirai.LogEvent) {
 	s.logger.Logf(logLevel, "qq client: %v\n", e.Message)
 }
 
+const QQToTelegramMessageHeaderFormat = "%s(%v) said:\n"
+
+func makeQQToTelegramMessageHeader(message *miraiMessage.GroupMessage) string {
+	return fmt.Sprintf(QQToTelegramMessageHeaderFormat, message.Sender.Nickname, message.Sender.Uin)
+}
+
 func (s *Service) handleQQGroupMessage(client *mirai.QQClient, message *miraiMessage.GroupMessage) {
 	precondition(s.qqClient == client)
 	s.logger.Infof("qq group message received: %v\n", message.Id)
-	if message.GroupCode != s.config.QQ.GroupId /*|| message.Sender.Uin == s.qqClient.Uin*/ {
+	if message.GroupCode != s.config.QQ.GroupId ||
+		(!s.config.Debug.QQDontFilterYourself && message.Sender.Uin == s.qqClient.Uin) {
 		return
 	}
 
-	go func() {
-		message := fmt.Sprintf("%s(%v) said: %s", message.Sender.Nickname, message.Sender.Uin, message.ToString())
-		for i := 0; i < SendMessageTryLimit; i++ {
-			msg, err := s.tgBot.Send(s.tgChat, message)
-			if err != nil {
-				s.logger.Warningf("failed to forward message from qq to telegram: %v", err)
-			} else {
-				s.logger.Infof("message sent to telegram: %v\n", msg.ID)
-				return
-			}
+	go s.composeTelegramMessage(message)
+}
+
+func (s *Service) qqFileToTelegramFile(element miraiMessage.IMessageElement) tb.File {
+	var imageUrl string
+
+	switch element.(type) {
+	case *miraiMessage.ImageElement:
+		imageElement := element.(*miraiMessage.ImageElement)
+		imageUrl = imageElement.Url
+	case *miraiMessage.GroupImageElement:
+		imageElement := element.(*miraiMessage.GroupImageElement)
+		imageUrl = imageElement.Url
+	default:
+		preconditionFailureWithMessage("not a fetchable element")
+	}
+
+	return tb.FromURL(imageUrl)
+}
+
+func (s *Service) composeTelegramMessage(message *miraiMessage.GroupMessage) {
+	textMessage := makeQQToTelegramMessageHeader(message)
+	album := tb.Album{}
+
+	for _, element := range message.Elements {
+		switch element.(type) {
+		case *miraiMessage.TextElement:
+			textMessage += element.(*miraiMessage.TextElement).Content
 		}
-	}()
+	}
+
+	for _, element := range message.Elements {
+		switch element.(type) {
+		case *miraiMessage.ImageElement, *miraiMessage.GroupImageElement:
+			photo := &tb.Photo{File: s.qqFileToTelegramFile(element)}
+			if textMessage != "" {
+				photo.Caption = textMessage
+			}
+			textMessage = ""
+			album = append(album, photo)
+		}
+	}
+
+	for i := 0; i < SendMessageTryLimit; i++ {
+		var messages []tb.Message
+		var err error
+
+		if len(album) == 0 {
+			message, innerErr := s.telegramBot.Send(s.telegramChat, textMessage)
+			if err = innerErr; err != nil {
+				goto handleError
+			}
+			//goland:noinspection GoNilness
+			messages = append(messages, *message)
+		} else {
+			innerMessages, innerErr := s.telegramBot.SendAlbum(s.telegramChat, album)
+			if err = innerErr; err != nil {
+				goto handleError
+			}
+			messages = append(messages, innerMessages...)
+		}
+
+		for _, message := range messages {
+			s.logger.Infof("telegram message sent: %v\n", message.ID)
+		}
+
+		return
+
+	handleError:
+		s.logger.Warningf("failed to forward message from qq to telegram: %v", err)
+	}
 }
 
 func (s *Service) Stop() error {
 	s.cancelFunc()
 
-	s.tgBot.Stop()
+	s.telegramBot.Stop()
 	s.qqClient.Disconnect()
 
 	s.logger.Infoln("service stopped")
@@ -566,11 +737,17 @@ func (s *Service) Stop() error {
 	return nil
 }
 
-func (s *Service) Run() {
-	s.tgBot.Start()
+func (s *Service) Run() error {
+	if !s.qqClient.Online {
+		if err := s.setupQQClient(); err != nil {
+			return s.reportIfError(err)
+		}
+	}
+	s.telegramBot.Start()
 
 	s.logger.Infoln("service running")
 	<-s.context.Done()
+	return nil
 }
 
 var exitSignalList = []os.Signal{syscall.SIGKILL, syscall.SIGABRT, syscall.SIGINT, syscall.SIGTERM}
@@ -604,5 +781,5 @@ func main() {
 	service, err := NewServiceFromConfig(config, true)
 	preconditionNoError(err)
 
-	service.Run()
+	preconditionNoError(service.Run())
 }
