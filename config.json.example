@@ -10,6 +10,18 @@
     "chat_id": <your telegram group chat id, an integer>,
     "my_id": <your telegram id, an integer>
   },
-  "verbose": <whether enable verbose output or not, a boolean>,
+  "network": {
+    "proxy": <proxy setting used for telegram bot, a string, optional>
+  },
+  "debug": {
+    "verbose": <whether enable verbose output or not, a boolean>
+  },
+  "redis": {
+    "url": <redis url, a string, optional>,
+    "address": <a string, optional>,
+    "db": <an integer, optional>,
+    "username": <a string, optional>,
+    "password": <a string, optional>
+  },
   "headless": <whether you are running this application on a headless device or not, a boolean>
 }

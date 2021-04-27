@@ -438,7 +438,7 @@ func (s *Service) handleTelegramImageMessage(m *tb.Message) {
 
 		s.qqToSendMessageChannel <- &qqToSendMessage{
 			originalTelegramMessageId: m.ID,
-			toSend:                    messageGenerator(),
+			toSend:                    messageGenerator,
 		}
 	}
 }
