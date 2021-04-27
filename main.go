@@ -836,7 +836,7 @@ func (s *Service) composeAndSendTelegramMessage(message *miraiMessage.GroupMessa
 	s.telegramToSendMessageChannel <- toSend
 }
 
-func (s *Service) Stop() error {
+func (s *Service) Stop() {
 	s.cancelFunc()
 
 	s.workerWaitGroup.Wait()
@@ -844,9 +844,13 @@ func (s *Service) Stop() error {
 	s.telegramBot.Stop()
 	s.qqClient.Disconnect()
 
-	s.logger.Infoln("service stopped")
+	if s.redisClient != nil {
+		if err := s.redisClient.Close(); err != nil {
+			s.logger.Warningf("failed to colse redis client: %v\n", err)
+		}
+	}
 
-	return nil
+	s.logger.Infoln("service stopped")
 }
 
 func (s *Service) ensureQQClientIsOnline() error {
@@ -882,7 +886,7 @@ func (s *Service) handleSignals() {
 			select {
 			case sig := <-signalChannel:
 				s.logger.Infof("exit signal received: %v\n", sig)
-				_ = s.Stop()
+				s.Stop()
 				return
 			case <-s.context.Done():
 				return
