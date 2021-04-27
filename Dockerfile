@@ -4,9 +4,12 @@ WORKDIR /app
 
 COPY go.mod .
 COPY go.sum .
+
+RUN go mod download
+
 COPY main.go .
 
-RUN CGO_ENABLED=0 go build -o app .
+RUN CGO_ENABLED=0 go build -v -o app .
 
 FROM alpine:latest
 
