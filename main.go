@@ -145,7 +145,7 @@ type telegramToSendMessage struct {
 
 const MessageQueueSize = 100
 
-func NewServiceFromConfig(config *Config, handleSignals bool) (*Service, error) {
+func NewServiceFromConfig(config *Config) (*Service, error) {
 	s := &Service{
 		config: config,
 		logger: log.New(),
@@ -171,10 +171,6 @@ func NewServiceFromConfig(config *Config, handleSignals bool) (*Service, error) 
 	}
 
 	s.context, s.cancelFunc = context.WithCancel(context.TODO())
-
-	if handleSignals {
-		s.handleSignals()
-	}
 
 	s.qqToSendMessageChannel = make(chan *qqToSendMessage, MessageQueueSize)
 	s.telegramToSendMessageChannel = make(chan *telegramToSendMessage, MessageQueueSize)
@@ -863,7 +859,7 @@ func (s *Service) ensureQQClientIsOnline() error {
 	return nil
 }
 
-func (s *Service) Run() error {
+func (s *Service) Run(handleSignals bool) error {
 	if err := s.ensureQQClientIsOnline(); err != nil {
 		return err
 	}
@@ -874,6 +870,9 @@ func (s *Service) Run() error {
 	s.telegramBot.Start()
 
 	s.logger.Infoln("service running")
+	if handleSignals {
+		s.handleSignals()
+	}
 	<-s.context.Done()
 	return nil
 }
@@ -882,18 +881,16 @@ func (s *Service) handleSignals() {
 	signalChannel := make(chan os.Signal)
 	signal.Notify(signalChannel, os.Interrupt, os.Kill)
 
-	go func() {
-		for {
-			select {
-			case sig := <-signalChannel:
-				s.logger.Infof("exit signal received: %v\n", sig)
-				s.Stop()
-				return
-			case <-s.context.Done():
-				return
-			}
+	for {
+		select {
+		case sig := <-signalChannel:
+			s.logger.Infof("exit signal received: %v\n", sig)
+			s.Stop()
+			return
+		case <-s.context.Done():
+			return
 		}
-	}()
+	}
 }
 
 var configFilename = flag.String("c", "config.json", "configuration file to be used")
@@ -904,8 +901,8 @@ func main() {
 	config, err := NewConfigFromFile(*configFilename)
 	preconditionNoError(err)
 
-	service, err := NewServiceFromConfig(config, true)
+	service, err := NewServiceFromConfig(config)
 	preconditionNoError(err)
 
-	preconditionNoError(service.Run())
+	preconditionNoError(service.Run(true))
 }
