@@ -16,6 +16,7 @@ import (
 	asciiArt "github.com/yinghau76/go-ascii-art"
 	tb "gopkg.in/tucnak/telebot.v2"
 	"image"
+	_ "image/jpeg"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -131,7 +132,7 @@ func NewServiceFromConfig(config *Config, handleSignals bool) (*Service, error) 
 		return nil, err
 	}
 
-	if err := s.reportIfError(s.setupTgBot()); err != nil {
+	if err := s.reportIfError(s.setupTelegramBot()); err != nil {
 		return nil, err
 	}
 	if err := s.reportIfError(s.setupQQClient()); err != nil {
@@ -173,7 +174,7 @@ func (s *Service) userDataPath(filename string) string {
 	return path.Join(s.config.UserDataFolder, filename)
 }
 
-func (s *Service) setupTgBot() error {
+func (s *Service) setupTelegramBot() error {
 	s.logger.Infoln("creating telegram bot")
 
 	var tgBotHttpClient *http.Client
@@ -200,10 +201,14 @@ func (s *Service) setupTgBot() error {
 			Timeout: 6 * time.Second,
 			AllowedUpdates: []string{
 				"message",
+				"edited_message",
 			},
 		},
-		//Verbose: s.config.Verbose,
-		Client: tgBotHttpClient,
+		Verbose: s.config.Verbose,
+		Client:  tgBotHttpClient,
+		Reporter: func(err error) {
+			s.logger.Errorf("telebot: %v", err)
+		},
 	})
 
 	if err != nil {
@@ -220,22 +225,27 @@ func (s *Service) setupTgBot() error {
 	s.logger.Infof("telegram chat found: %s(%v)\n", s.tgChat.Title, s.tgChat.ID)
 
 	s.tgBot.Handle(tb.OnText, s.handleTelegramTextMessage)
+	s.tgBot.Handle(tb.OnPhoto, s.handleTelegramImageMessage)
 
 	return nil
 }
 
+const TelegramToQQMessageHeaderFormat = "%s %s(%s) said:\n"
+
+func makeTelegramToQQMessageHeader(m *tb.Message) string {
+	return fmt.Sprintf(TelegramToQQMessageHeaderFormat,
+		m.Sender.FirstName, m.Sender.LastName, m.Sender.Username)
+}
+
 func (s *Service) handleTelegramTextMessage(m *tb.Message) {
-	if m != nil &&
-		m.Chat.ID == s.config.Telegram.ChatId &&
+	if m.Chat.ID == s.config.Telegram.ChatId &&
 		!m.Sender.IsBot {
 		s.logger.Infof("telegram message received: %v\n", m.ID)
 		go func() {
 			var groupMessage *miraiMessage.GroupMessage
-			message := &miraiMessage.SendingMessage{Elements: []miraiMessage.IMessageElement{
-				&miraiMessage.TextElement{
-					Content: fmt.Sprintf("%s %s(%s) said: %s", m.Sender.FirstName, m.Sender.LastName, m.Sender.Username, m.Text),
-				},
-			}}
+			message := miraiMessage.NewSendingMessage()
+			message.Append(miraiMessage.NewText(makeTelegramToQQMessageHeader(m)))
+			message.Append(miraiMessage.NewText(m.Text))
 			for i := 0; i < SendMessageTryLimit; i++ {
 				groupMessage = s.qqClient.SendGroupMessage(s.config.QQ.GroupId, message)
 				if groupMessage.Id != -1 {
@@ -245,7 +255,54 @@ func (s *Service) handleTelegramTextMessage(m *tb.Message) {
 			}
 			s.logger.Errorf("failed to send qq group message")
 		}()
+	}
+}
 
+func (s *Service) handleTelegramImageMessage(m *tb.Message) {
+	if m.Chat.ID == s.config.Telegram.ChatId &&
+		!m.Sender.IsBot {
+		s.logger.Infof("telegram message received: %v\n", m.ID)
+		go func() {
+			reader, err := s.tgBot.GetFile(m.Photo.MediaFile())
+			if err != nil {
+				s.logger.Errorf("failed to download telegram photo: %v\n", err)
+				return
+			}
+
+			data, err := ioutil.ReadAll(reader)
+			if err != nil {
+				s.logger.Errorf("failed to download telegram photo: %v\n", err)
+				return
+			}
+
+			readSeeker := bytes.NewReader(data)
+
+			var groupImageElement *miraiMessage.GroupImageElement
+
+			for i := 0; i < SendMessageTryLimit; i++ {
+				groupImageElement, err = s.qqClient.UploadGroupImage(s.config.QQ.GroupId, readSeeker)
+				if err != nil {
+					s.logger.Warningf("failed to upload qq group image: %v", err)
+				}
+			}
+			if err != nil {
+				s.logger.Errorf("failed to upload qq group message, message not sent")
+				return
+			}
+
+			var message = miraiMessage.NewSendingMessage()
+			message.Append(miraiMessage.NewText(makeTelegramToQQMessageHeader(m)))
+			message.Append(groupImageElement)
+
+			for i := 0; i < SendMessageTryLimit; i++ {
+				groupMessage := s.qqClient.SendGroupMessage(s.config.QQ.GroupId, message)
+				if groupMessage.Id != -1 {
+					s.logger.Infof("qq group message sent, id: %v\n", groupMessage.Id)
+					return
+				}
+			}
+			s.logger.Errorf("failed to send qq group message")
+		}()
 	}
 }
 
@@ -375,7 +432,6 @@ func (s *Service) handleQQLoginResponse(loginResp *mirai.LoginResponse) (loginEr
 		}
 	}
 
-	s.logger.Infoln("qq login success")
 	return nil
 }
 
@@ -402,14 +458,13 @@ func (s *Service) loginQQAccountUsingSessionToken() error {
 	}()
 
 	if isFileOrFolderExists(s.userDataPath(QQSessionTokenFilename)) {
-		s.logger.Info("session token file found, try login in qq using session token")
+		s.logger.Info("session token file found, try login in using session token")
 		if sessionTokenData, err := ioutil.ReadFile(s.userDataPath(QQSessionTokenFilename)); err == nil {
 			r := binary.NewReader(sessionTokenData)
 			sessionTokenAccount := r.ReadInt64()
 			if s.config.QQ.Account != 0 && sessionTokenAccount == s.config.QQ.Account {
 				s.qqClient = mirai.NewClientEmpty()
 				if err := s.qqClient.TokenLogin(sessionTokenData); err == nil {
-					s.logger.Infoln("qq login success")
 					shouldRemoveCurrentSessionToken = false
 					return nil
 				} else {
@@ -451,9 +506,10 @@ func (s *Service) setupQQClient() error {
 	}
 
 loginSuccess:
+	s.logger.Infof("qq login success: %s(%v)\n", s.qqClient.Nickname, s.qqClient.Uin)
+
 	s.qqClient.OnGroupMessage(s.handleQQGroupMessage)
 	s.qqClient.OnLog(s.handleQQLog)
-	s.qqClient.OnSelfGroupMessage(s.handleQQGroupMessage)
 
 	if err := ioutil.WriteFile(s.userDataPath(QQSessionTokenFilename), s.qqClient.GenToken(), 0600); err != nil {
 		s.logger.Warningf("failed to persist session token: %v", err)
