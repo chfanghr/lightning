@@ -126,7 +126,8 @@ type Service struct {
 
 	telegramChat *tb.Chat
 
-	qqToSendMessageChannel chan *qqToSendMessage
+	qqToSendMessageChannel       chan *qqToSendMessage
+	telegramToSendMessageChannel chan *telegramToSendMessage
 
 	workerWaitGroup sync.WaitGroup
 
@@ -137,6 +138,13 @@ type qqToSendMessage struct {
 	originalTelegramMessageId int
 	toSend                    interface{}
 }
+
+type telegramToSendMessage struct {
+	originalQQMessageId int32
+	toSend              interface{}
+}
+
+const MessageQueueSize = 100
 
 func NewServiceFromConfig(config *Config, handleSignals bool) (*Service, error) {
 	s := &Service{
@@ -169,7 +177,8 @@ func NewServiceFromConfig(config *Config, handleSignals bool) (*Service, error) 
 		s.handleSignals()
 	}
 
-	s.qqToSendMessageChannel = make(chan *qqToSendMessage, 100)
+	s.qqToSendMessageChannel = make(chan *qqToSendMessage, MessageQueueSize)
+	s.telegramToSendMessageChannel = make(chan *telegramToSendMessage, MessageQueueSize)
 
 	if err := s.setupRedisDatabase(); err != nil {
 		s.redisClient = nil
@@ -208,7 +217,19 @@ func (s *Service) setupRedisDatabase() (err error) {
 	return nil
 }
 
+func (s *Service) runQQMessageSender() {
+	s.workerWaitGroup.Add(1)
+	go s.qqMessageSender()
+}
+
+func (s *Service) runTelegramMessageSender() {
+	s.workerWaitGroup.Add(1)
+	go s.telegramMessageSender()
+}
+
 func (s *Service) qqMessageSender() {
+	defer s.workerWaitGroup.Done()
+
 	s.logger.Infof("qq message sender started")
 
 	sendMessage := func(toSend *qqToSendMessage) {
@@ -229,24 +250,23 @@ func (s *Service) qqMessageSender() {
 					break
 				}
 			}
-			if err != nil {
-				s.logger.Errorf("failed to generate qq message: %v\n", err)
-				goto failure
+		}
+
+		if err != nil {
+			err = fmt.Errorf("failed to generate qq message: %v", err)
+		} else {
+			for i := 0; i < TryLimit; i++ {
+				groupMessage = s.qqClient.SendGroupMessage(s.config.QQ.GroupId, message)
+				if groupMessage == nil || groupMessage.Id == -1 {
+					s.logger.Warningln("failed to send qq group message")
+					time.Sleep(time.Second)
+				} else {
+					break
+				}
 			}
 		}
 
-		for i := 0; i < TryLimit; i++ {
-			groupMessage = s.qqClient.SendGroupMessage(s.config.QQ.GroupId, message)
-			if groupMessage == nil || groupMessage.Id == -1 {
-				s.logger.Warningln("failed to send qq group message")
-				time.Sleep(time.Second)
-			} else {
-				return
-			}
-		}
-
-	failure:
-		s.logger.Errorf("failed to forward telegram message (%v) to qq\n", toSend.originalTelegramMessageId)
+		s.reportForwardFromTelegramToQQ(toSend.originalTelegramMessageId, groupMessage, err)
 	}
 
 	for {
@@ -255,13 +275,79 @@ func (s *Service) qqMessageSender() {
 			for msg := range s.qqToSendMessageChannel {
 				sendMessage(msg)
 			}
-			close(s.qqToSendMessageChannel)
-			s.workerWaitGroup.Done()
 			return
-		case msg := <-s.qqToSendMessageChannel:
-			sendMessage(msg)
+		case toSend := <-s.qqToSendMessageChannel:
+			sendMessage(toSend)
+		default:
+			if err := s.ensureQQClientIsOnline(); err != nil {
+				s.logger.Warningf("qq client is not online: %v\n", err)
+			}
 		}
 	}
+}
+
+func (s *Service) reportForwardFromQQToTelegram(qqMessageId int32, forwarded interface{}, err error) {
+	if err != nil {
+		s.logger.Errorf("failed to forward qq message %v: %v\n", qqMessageId, err)
+		return
+	}
+
+	var forwardedMessageIds []int
+	switch forwarded.(type) {
+	case *tb.Message:
+		forwardedMessageIds = append(forwardedMessageIds, forwarded.(*tb.Message).ID)
+	case []tb.Message:
+		messages := forwarded.([]tb.Message)
+		for _, message := range messages {
+			forwardedMessageIds = append(forwardedMessageIds, message.ID)
+		}
+	}
+
+	s.logger.Errorf("qq message %v forwarded to telegram: %v\n", qqMessageId, forwardedMessageIds)
+}
+
+func (s *Service) telegramMessageSender() {
+	defer s.workerWaitGroup.Done()
+
+	sendMessage := func(toSend *telegramToSendMessage) {
+		var res interface{}
+		var err error
+
+		for i := 0; i < TryLimit; i++ {
+			switch toSend.toSend.(type) {
+			case tb.Album:
+				res, err = s.telegramBot.SendAlbum(s.telegramChat, toSend.toSend.(tb.Album))
+			default:
+				res, err = s.telegramBot.Send(s.telegramChat, toSend.toSend)
+			}
+
+			if err == nil {
+				break
+			}
+		}
+
+		s.reportForwardFromQQToTelegram(toSend.originalQQMessageId, res, err)
+	}
+
+	for {
+		select {
+		case <-s.context.Done():
+			for toSend := range s.telegramToSendMessageChannel {
+				sendMessage(toSend)
+			}
+			return
+		case toSend := <-s.telegramToSendMessageChannel:
+			sendMessage(toSend)
+		}
+	}
+}
+
+func (s *Service) reportForwardFromTelegramToQQ(telegramMessageId int, qqGroupMessage *miraiMessage.GroupMessage, err error) {
+	if err != nil {
+		s.logger.Errorf("failed to forward telegram message %v: %v", telegramMessageId, err)
+		return
+	}
+	s.logger.Infof("telegram message %v forwarded to qq: %v", telegramMessageId, qqGroupMessage.Id)
 }
 
 func (s *Service) makeUserDataDirectoryIfNeeded() error {
@@ -361,7 +447,6 @@ func makeTelegramToQQMessageHeader(m *tb.Message) string {
 }
 
 func (s *Service) handleTelegramTextMessage(m *tb.Message) {
-
 	s.logger.Infof("telegram message received: %v\n", m.ID)
 	message := miraiMessage.NewSendingMessage()
 	message.Append(miraiMessage.NewText(makeTelegramToQQMessageHeader(m) + m.Text))
@@ -369,7 +454,6 @@ func (s *Service) handleTelegramTextMessage(m *tb.Message) {
 		originalTelegramMessageId: m.ID,
 		toSend:                    message,
 	}
-
 }
 
 func (s *Service) handleTelegramImageMessage(m *tb.Message) {
@@ -690,13 +774,13 @@ func makeQQToTelegramMessageHeader(message *miraiMessage.GroupMessage) string {
 
 func (s *Service) handleQQGroupMessage(client *mirai.QQClient, message *miraiMessage.GroupMessage) {
 	precondition(s.qqClient == client)
-	s.logger.Infof("qq group message received: %v\n", message.Id)
 	if message.GroupCode != s.config.QQ.GroupId ||
 		(!s.config.Debug.QQDontFilterYourself && message.Sender.Uin == s.qqClient.Uin) {
 		return
 	}
+	s.logger.Infof("qq group message received: %v\n", message.Id)
 
-	go s.composeAndSendTelegramMessage(message)
+	s.composeAndSendTelegramMessage(message)
 }
 
 func (s *Service) qqFileToTelegramFile(element miraiMessage.IMessageElement) tb.File {
@@ -739,60 +823,18 @@ func (s *Service) composeAndSendTelegramMessage(message *miraiMessage.GroupMessa
 		}
 	}
 
-	var forwardedMessages []tb.Message
-	var err error
+	toSend := &telegramToSendMessage{originalQQMessageId: message.Id}
 
-	for i := 0; i < TryLimit; i++ {
-		switch len(album) {
-		case 0:
-			message, innerErr := s.telegramBot.Send(s.telegramChat, textMessage)
-			if err = innerErr; err != nil {
-				goto handleError
-			}
-			//goland:noinspection GoNilness
-			forwardedMessages = append(forwardedMessages, *message)
-			break
-		case 1:
-			message, innerErr := s.telegramBot.Send(s.telegramChat, album[0])
-			if err = innerErr; err != nil {
-				goto handleError
-			}
-			//goland:noinspection GoNilness
-			forwardedMessages = append(forwardedMessages, *message)
-			break
-		default:
-			innerMessages, innerErr := s.telegramBot.SendAlbum(s.telegramChat, album)
-			if err = innerErr; err != nil {
-				goto handleError
-			}
-			forwardedMessages = append(forwardedMessages, innerMessages...)
-			break
-		}
-
-	handleError:
-		s.logger.Warningf("failed to forward message from qq: %v\n", err)
+	switch len(album) {
+	case 0:
+		toSend.toSend = textMessage
+	case 1:
+		toSend.toSend = album[0]
+	default:
+		toSend.toSend = album
 	}
 
-	if err != nil {
-		s.reportForwardFromQQToTelegramError(message, err)
-		return
-	}
-
-	s.reportForwardFromQQToTelegram(message, forwardedMessages)
-}
-
-func (s *Service) reportForwardFromQQToTelegramError(message *miraiMessage.GroupMessage, err error) {
-	s.logger.Errorf("failed to forward qq message(%v) to telegram: %v", message.Id, err)
-}
-
-func (s *Service) reportForwardFromQQToTelegram(message *miraiMessage.GroupMessage, forwarded []tb.Message) {
-	var forwardedIds []int
-
-	for _, message := range forwarded {
-		forwardedIds = append(forwardedIds, message.ID)
-	}
-
-	s.logger.Infof("message forwarded: from qq(%v) to telegram(%v)", message.Id, forwardedIds)
+	s.telegramToSendMessageChannel <- toSend
 }
 
 func (s *Service) Stop() error {
@@ -808,15 +850,22 @@ func (s *Service) Stop() error {
 	return nil
 }
 
-func (s *Service) Run() error {
+func (s *Service) ensureQQClientIsOnline() error {
 	if !s.qqClient.Online {
 		if err := s.setupQQClient(); err != nil {
 			return s.reportIfError(err)
 		}
 	}
+	return nil
+}
 
-	s.workerWaitGroup.Add(1)
-	go s.qqMessageSender()
+func (s *Service) Run() error {
+	if err := s.ensureQQClientIsOnline(); err != nil {
+		return err
+	}
+
+	s.runQQMessageSender()
+	s.runTelegramMessageSender()
 
 	s.telegramBot.Start()
 
