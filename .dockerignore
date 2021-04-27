@@ -2,3 +2,4 @@ config.json
 device.json
 .idea
 session.token
+userdata
