@@ -405,8 +405,12 @@ func (s *Service) setupTelegramBot() error {
 		if update.Message == nil {
 			return false
 		}
-		return !update.Message.Sender.IsBot &&
-			update.Message.Chat.ID == s.config.Telegram.ChatId
+		if !update.Message.Sender.IsBot &&
+			update.Message.Chat.ID == s.config.Telegram.ChatId {
+			s.logger.Infof("telegram message received: %v\n", update.Message.ID)
+			return true
+		}
+		return false
 	})
 
 	s.telegramBot, err = tb.NewBot(tb.Settings{
@@ -446,7 +450,6 @@ func makeTelegramToQQMessageHeader(m *tb.Message) string {
 }
 
 func (s *Service) handleTelegramTextMessage(m *tb.Message) {
-	s.logger.Infof("telegram message received: %v\n", m.ID)
 	message := miraiMessage.NewSendingMessage()
 	message.Append(miraiMessage.NewText(makeTelegramToQQMessageHeader(m) + m.Text))
 	s.qqToSendMessageChannel <- &qqToSendMessage{
@@ -456,8 +459,6 @@ func (s *Service) handleTelegramTextMessage(m *tb.Message) {
 }
 
 func (s *Service) handleTelegramImageMessage(m *tb.Message) {
-	s.logger.Infof("telegram message received: %v\n", m.ID)
-
 	type imageElementOrError struct {
 		imageElement *miraiMessage.GroupImageElement
 		imageCaption string
