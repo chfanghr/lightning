@@ -8,7 +8,6 @@
   "telegram": {
     "bot_token": <your telegram bot token, a string>,
     "chat_id": <your telegram group chat id, an integer>,
-    "my_id": <your telegram id, an integer>
   },
   "network": {
     "proxy": <proxy setting used for telegram bot, a string, optional>

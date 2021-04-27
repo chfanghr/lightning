@@ -69,9 +69,7 @@ type Config struct {
 	Telegram struct {
 		BotToken string `json:"bot_token"`
 
-		MyId      int     `json:"my_id"`
-		ChatId    int64   `json:"chat_id"`
-		FilterIds []int64 `json:"filter_ids,omitempty"`
+		ChatId int64 `json:"chat_id"`
 	} `json:"telegram"`
 
 	Network struct {
@@ -312,16 +310,23 @@ func (s *Service) setupTelegramBot() error {
 
 	var err error
 
-	s.telegramBot, err = tb.NewBot(tb.Settings{
-		Token: s.config.Telegram.BotToken,
-		Poller: &tb.LongPoller{
-			Limit:   10,
-			Timeout: 6 * time.Second,
-			AllowedUpdates: []string{
-				"message",
-				"edited_message",
-			},
+	botPoller := tb.NewMiddlewarePoller(&tb.LongPoller{
+		Limit:   10,
+		Timeout: 6 * time.Second,
+		AllowedUpdates: []string{
+			"message",
 		},
+	}, func(update *tb.Update) bool {
+		if update.Message == nil {
+			return false
+		}
+		return !update.Message.Sender.IsBot &&
+			update.Message.Chat.ID == s.config.Telegram.ChatId
+	})
+
+	s.telegramBot, err = tb.NewBot(tb.Settings{
+		Token:   s.config.Telegram.BotToken,
+		Poller:  botPoller,
 		Verbose: s.config.Debug.Verbose,
 		Client:  tgBotHttpClient,
 		Reporter: func(err error) {
@@ -356,88 +361,84 @@ func makeTelegramToQQMessageHeader(m *tb.Message) string {
 }
 
 func (s *Service) handleTelegramTextMessage(m *tb.Message) {
-	if m.Chat.ID == s.config.Telegram.ChatId &&
-		!m.Sender.IsBot {
-		s.logger.Infof("telegram message received: %v\n", m.ID)
-		message := miraiMessage.NewSendingMessage()
-		message.Append(miraiMessage.NewText(makeTelegramToQQMessageHeader(m) + m.Text))
-		s.qqToSendMessageChannel <- &qqToSendMessage{
-			originalTelegramMessageId: m.ID,
-			toSend:                    message,
-		}
+
+	s.logger.Infof("telegram message received: %v\n", m.ID)
+	message := miraiMessage.NewSendingMessage()
+	message.Append(miraiMessage.NewText(makeTelegramToQQMessageHeader(m) + m.Text))
+	s.qqToSendMessageChannel <- &qqToSendMessage{
+		originalTelegramMessageId: m.ID,
+		toSend:                    message,
 	}
+
 }
 
 func (s *Service) handleTelegramImageMessage(m *tb.Message) {
-	if m.Chat.ID == s.config.Telegram.ChatId &&
-		!m.Sender.IsBot {
-		s.logger.Infof("telegram message received: %v\n", m.ID)
+	s.logger.Infof("telegram message received: %v\n", m.ID)
 
-		type imageElementOrError struct {
-			imageElement *miraiMessage.GroupImageElement
-			imageCaption string
-			err          error
+	type imageElementOrError struct {
+		imageElement *miraiMessage.GroupImageElement
+		imageCaption string
+		err          error
+	}
+
+	imageChan := make(chan imageElementOrError)
+
+	imageDownloader := func() {
+		reader, err := s.telegramBot.GetFile(m.Photo.MediaFile())
+		if err != nil {
+			imageChan <- imageElementOrError{
+				err: fmt.Errorf("failed to download telegram photo: %w", err),
+			}
 		}
 
-		imageChan := make(chan imageElementOrError)
+		data, err := ioutil.ReadAll(reader)
+		if err != nil {
+			imageChan <- imageElementOrError{
+				err: fmt.Errorf("failed to download telegram photo: %w", err),
+			}
+		}
 
-		imageDownloader := func() {
-			reader, err := s.telegramBot.GetFile(m.Photo.MediaFile())
+		readSeeker := bytes.NewReader(data)
+
+		var groupImageElement *miraiMessage.GroupImageElement
+
+		for i := 0; i < TryLimit; i++ {
+			groupImageElement, err = s.qqClient.UploadGroupImage(s.config.QQ.GroupId, readSeeker)
 			if err != nil {
-				imageChan <- imageElementOrError{
-					err: fmt.Errorf("failed to download telegram photo: %w", err),
-				}
+				s.logger.Warningf("failed to upload qq group image: %v", err)
+				continue
 			}
-
-			data, err := ioutil.ReadAll(reader)
-			if err != nil {
-				imageChan <- imageElementOrError{
-					err: fmt.Errorf("failed to download telegram photo: %w", err),
-				}
+			imageChan <- imageElementOrError{
+				imageElement: groupImageElement,
+				imageCaption: m.Photo.Caption,
 			}
-
-			readSeeker := bytes.NewReader(data)
-
-			var groupImageElement *miraiMessage.GroupImageElement
-
-			for i := 0; i < TryLimit; i++ {
-				groupImageElement, err = s.qqClient.UploadGroupImage(s.config.QQ.GroupId, readSeeker)
-				if err != nil {
-					s.logger.Warningf("failed to upload qq group image: %v", err)
-					continue
-				}
-				imageChan <- imageElementOrError{
-					imageElement: groupImageElement,
-					imageCaption: m.Photo.Caption,
-				}
-				return
-			}
-
-			if err != nil {
-				imageChan <- imageElementOrError{
-					err: fmt.Errorf("failed to upload qq group message: %w", err),
-				}
-			}
-		}
-		go imageDownloader()
-
-		messageGenerator := func() (*miraiMessage.SendingMessage, error) {
-			downloadResult := <-imageChan
-			if downloadResult.err != nil {
-				return nil, downloadResult.err
-			}
-
-			var message = miraiMessage.NewSendingMessage()
-			message.Append(miraiMessage.NewText(makeTelegramToQQMessageHeader(m) + downloadResult.imageCaption))
-			message.Append(downloadResult.imageElement)
-
-			return message, nil
+			return
 		}
 
-		s.qqToSendMessageChannel <- &qqToSendMessage{
-			originalTelegramMessageId: m.ID,
-			toSend:                    messageGenerator,
+		if err != nil {
+			imageChan <- imageElementOrError{
+				err: fmt.Errorf("failed to upload qq group message: %w", err),
+			}
 		}
+	}
+	go imageDownloader()
+
+	messageGenerator := func() (*miraiMessage.SendingMessage, error) {
+		downloadResult := <-imageChan
+		if downloadResult.err != nil {
+			return nil, downloadResult.err
+		}
+
+		var message = miraiMessage.NewSendingMessage()
+		message.Append(miraiMessage.NewText(makeTelegramToQQMessageHeader(m) + downloadResult.imageCaption))
+		message.Append(downloadResult.imageElement)
+
+		return message, nil
+	}
+
+	s.qqToSendMessageChannel <- &qqToSendMessage{
+		originalTelegramMessageId: m.ID,
+		toSend:                    messageGenerator,
 	}
 }
 
