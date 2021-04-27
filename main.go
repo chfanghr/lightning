@@ -26,7 +26,6 @@ import (
 	"path"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -874,11 +873,9 @@ func (s *Service) Run() error {
 	return nil
 }
 
-var exitSignalList = []os.Signal{syscall.SIGKILL, syscall.SIGABRT, syscall.SIGINT, syscall.SIGTERM}
-
 func (s *Service) handleSignals() {
 	signalChannel := make(chan os.Signal)
-	signal.Notify(signalChannel, exitSignalList...)
+	signal.Notify(signalChannel, os.Interrupt, os.Kill)
 
 	go func() {
 		for {
