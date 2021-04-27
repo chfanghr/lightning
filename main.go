@@ -375,6 +375,7 @@ func (s *Service) handleTelegramImageMessage(m *tb.Message) {
 
 		type imageElementOrError struct {
 			imageElement *miraiMessage.GroupImageElement
+			imageCaption string
 			err          error
 		}
 
@@ -384,16 +385,14 @@ func (s *Service) handleTelegramImageMessage(m *tb.Message) {
 			reader, err := s.telegramBot.GetFile(m.Photo.MediaFile())
 			if err != nil {
 				imageChan <- imageElementOrError{
-					nil,
-					fmt.Errorf("failed to download telegram photo: %w", err),
+					err: fmt.Errorf("failed to download telegram photo: %w", err),
 				}
 			}
 
 			data, err := ioutil.ReadAll(reader)
 			if err != nil {
 				imageChan <- imageElementOrError{
-					nil,
-					fmt.Errorf("failed to download telegram photo: %w", err),
+					err: fmt.Errorf("failed to download telegram photo: %w", err),
 				}
 			}
 
@@ -408,16 +407,15 @@ func (s *Service) handleTelegramImageMessage(m *tb.Message) {
 					continue
 				}
 				imageChan <- imageElementOrError{
-					groupImageElement,
-					nil,
+					imageElement: groupImageElement,
+					imageCaption: m.Photo.Caption,
 				}
 				return
 			}
 
 			if err != nil {
 				imageChan <- imageElementOrError{
-					nil,
-					fmt.Errorf("failed to upload qq group message: %w", err),
+					err: fmt.Errorf("failed to upload qq group message: %w", err),
 				}
 			}
 		}
@@ -430,7 +428,7 @@ func (s *Service) handleTelegramImageMessage(m *tb.Message) {
 			}
 
 			var message = miraiMessage.NewSendingMessage()
-			message.Append(miraiMessage.NewText(makeTelegramToQQMessageHeader(m)))
+			message.Append(miraiMessage.NewText(makeTelegramToQQMessageHeader(m) + downloadResult.imageCaption))
 			message.Append(downloadResult.imageElement)
 
 			return message, nil
@@ -697,7 +695,7 @@ func (s *Service) handleQQGroupMessage(client *mirai.QQClient, message *miraiMes
 		return
 	}
 
-	go s.composeTelegramMessage(message)
+	go s.composeAndSendTelegramMessage(message)
 }
 
 func (s *Service) qqFileToTelegramFile(element miraiMessage.IMessageElement) tb.File {
@@ -717,7 +715,7 @@ func (s *Service) qqFileToTelegramFile(element miraiMessage.IMessageElement) tb.
 	return tb.FromURL(imageUrl)
 }
 
-func (s *Service) composeTelegramMessage(message *miraiMessage.GroupMessage) {
+func (s *Service) composeAndSendTelegramMessage(message *miraiMessage.GroupMessage) {
 	textMessage := makeQQToTelegramMessageHeader(message)
 	album := tb.Album{}
 
@@ -740,34 +738,60 @@ func (s *Service) composeTelegramMessage(message *miraiMessage.GroupMessage) {
 		}
 	}
 
-	for i := 0; i < TryLimit; i++ {
-		var messages []tb.Message
-		var err error
+	var forwardedMessages []tb.Message
+	var err error
 
-		if len(album) == 0 {
+	for i := 0; i < TryLimit; i++ {
+		switch len(album) {
+		case 0:
 			message, innerErr := s.telegramBot.Send(s.telegramChat, textMessage)
 			if err = innerErr; err != nil {
 				goto handleError
 			}
 			//goland:noinspection GoNilness
-			messages = append(messages, *message)
-		} else {
+			forwardedMessages = append(forwardedMessages, *message)
+			break
+		case 1:
+			message, innerErr := s.telegramBot.Send(s.telegramChat, album[0])
+			if err = innerErr; err != nil {
+				goto handleError
+			}
+			//goland:noinspection GoNilness
+			forwardedMessages = append(forwardedMessages, *message)
+			break
+		default:
 			innerMessages, innerErr := s.telegramBot.SendAlbum(s.telegramChat, album)
 			if err = innerErr; err != nil {
 				goto handleError
 			}
-			messages = append(messages, innerMessages...)
+			forwardedMessages = append(forwardedMessages, innerMessages...)
+			break
 		}
-
-		for _, message := range messages {
-			s.logger.Infof("telegram message sent: %v\n", message.ID)
-		}
-
-		return
 
 	handleError:
-		s.logger.Warningf("failed to forward message from qq to telegram: %v", err)
+		s.logger.Warningf("failed to forward message from qq: %v\n", err)
 	}
+
+	if err != nil {
+		s.reportForwardFromQQToTelegramError(message, err)
+		return
+	}
+
+	s.reportForwardFromQQToTelegram(message, forwardedMessages)
+}
+
+func (s *Service) reportForwardFromQQToTelegramError(message *miraiMessage.GroupMessage, err error) {
+	s.logger.Errorf("failed to forward qq message(%v) to telegram: %v", message.Id, err)
+}
+
+func (s *Service) reportForwardFromQQToTelegram(message *miraiMessage.GroupMessage, forwarded []tb.Message) {
+	var forwardedIds []int
+
+	for _, message := range forwarded {
+		forwardedIds = append(forwardedIds, message.ID)
+	}
+
+	s.logger.Infof("message forwarded: from qq(%v) to telegram(%v)", message.Id, forwardedIds)
 }
 
 func (s *Service) Stop() error {
