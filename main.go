@@ -490,7 +490,7 @@ func (s *Service) handleTelegramImageMessage(m *tb.Message) {
 			}
 			imageChan <- imageElementOrError{
 				imageElement: groupImageElement,
-				imageCaption: m.Photo.Caption,
+				imageCaption: m.Caption,
 			}
 			return
 		}
