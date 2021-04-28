@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -337,14 +338,17 @@ func (s *Service) recordForwardFromQQToTelegram(qqMessageId int32, forwardedTele
 		pipeline.RPush(s.redisClient.Context(), recordKey, id)
 	}
 	pipeline.Expire(s.redisClient.Context(), recordKey, QQMessageRecallExpireTime)
-	go func() {
-		_, err := pipeline.Exec(s.redisClient.Context())
-		if err != nil {
-			s.logger.Warningf("failed to record qq to telegram message: %v", err)
-		} else {
-			s.logger.Infof("qq to telegram message recorded")
-		}
-	}()
+	go s.executeRedisPipeline(pipeline, func() {
+		s.logger.Infof("qq message %v recorded", qqMessageId)
+	})
+}
+
+func (s *Service) executeRedisPipeline(pipeline redis.Pipeliner, onSuccess func()) {
+	_, err := pipeline.Exec(s.redisClient.Context())
+	if err != nil {
+		s.logger.Warningf("failed to execute redis pipeline: %v", err)
+	}
+	onSuccess()
 }
 
 func (s *Service) telegramMessageSender() {
@@ -389,6 +393,23 @@ func (s *Service) reportForwardFromTelegramToQQ(telegramMessageId int, qqGroupMe
 		return
 	}
 	s.logger.Infof("telegram message %v forwarded to qq: %v", telegramMessageId, qqGroupMessage.Id)
+	s.recordForwardFromTelegramToQQ(telegramMessageId, qqGroupMessage.Id, qqGroupMessage.InternalId)
+}
+
+const TelegramToQQRedisRecordKeyFormat = "tg2qq:%d"
+
+func (s *Service) recordForwardFromTelegramToQQ(telegramMessageId int, qqMessageId int32, qqMessageInternalId int32) {
+	if s.redisClient == nil {
+		return
+	}
+	recordKey := fmt.Sprintf(TelegramToQQRedisRecordKeyFormat, telegramMessageId)
+	pipeline := s.redisClient.Pipeline()
+	pipeline.RPush(s.redisClient.Context(), recordKey, qqMessageId, qqMessageInternalId)
+	pipeline.Expire(s.redisClient.Context(), recordKey, QQMessageRecallExpireTime)
+
+	go s.executeRedisPipeline(pipeline, func() {
+		s.logger.Infof("telegram message %v recorded", telegramMessageId)
+	})
 }
 
 func (s *Service) makeUserDataDirectoryIfNeeded() error {
@@ -416,6 +437,8 @@ const TryLimit = 10
 func (s *Service) userDataPath(filename string) string {
 	return path.Join(s.config.UserDataFolder, filename)
 }
+
+const TelegramRecallMessageCommand = "/recall"
 
 func (s *Service) setupTelegramBot() error {
 	s.logger.Infoln("creating telegram bot")
@@ -480,8 +503,58 @@ func (s *Service) setupTelegramBot() error {
 
 	s.telegramBot.Handle(tb.OnText, s.handleTelegramTextMessage)
 	s.telegramBot.Handle(tb.OnPhoto, s.handleTelegramImageMessage)
+	s.telegramBot.Handle(TelegramRecallMessageCommand, s.handleTelegramRecallCommand)
 
 	return nil
+}
+
+func (s *Service) handleTelegramRecallCommand(m *tb.Message) {
+	cleanUp := func() {
+		err := s.telegramBot.Delete(telegramToRecallMessage{
+			messageID: strconv.Itoa(m.ID),
+			chatID:    s.telegramChat.ID,
+		})
+		if err != nil {
+			s.logger.Warningf("failed to clean up telegram recall command message %v: %v", m.ID, err)
+		}
+	}
+
+	if m.ReplyTo == nil {
+		cleanUp()
+		return
+	}
+
+	toRecallMessageId := m.ReplyTo.ID
+	s.logger.Infof("recall command invoked: %v", toRecallMessageId)
+
+	recallTask := func() {
+		defer cleanUp()
+
+		recordKey := fmt.Sprintf(TelegramToQQRedisRecordKeyFormat, toRecallMessageId)
+		res, err := s.redisClient.LRange(s.redisClient.Context(), recordKey, 0, -1).Result()
+		if err != nil {
+			s.logger.Warningf("failed to find telegram message %v to qq message record: %v", m.ReplyTo.ID, err)
+			return
+		}
+		qqMessageId, err := strconv.ParseInt(res[0], 10, 32)
+		preconditionNoError(err)
+		qqMessageInternalId, err := strconv.ParseInt(res[1], 10, 32)
+		preconditionNoError(err)
+
+		if err := s.qqClient.RecallGroupMessage(s.config.QQ.GroupId, int32(qqMessageId), int32(qqMessageInternalId)); err != nil {
+			s.logger.Warningf("failed to recall telegram message %v from qq: %v", m.ReplyTo.ID, err)
+			return
+		}
+
+		if err := s.telegramBot.Delete(telegramToRecallMessage{
+			messageID: strconv.Itoa(m.ReplyTo.ID),
+			chatID:    s.telegramChat.ID,
+		}); err != nil {
+			s.logger.Warningf("failed to delete original telegram message %v: %v", m.ReplyTo.ID, err)
+		}
+	}
+
+	go recallTask()
 }
 
 const TelegramToQQMessageHeaderFormat = "%s %s(%s) said:\n"
@@ -720,7 +793,7 @@ func (s *Service) loginQQAccountUsingSessionToken() error {
 	}()
 
 	if isFileOrFolderExists(s.userDataPath(QQSessionTokenFilename)) {
-		s.logger.Info("session token file found, try login qq using session token")
+		s.logger.Info("qq session token file found")
 		if sessionTokenData, err := ioutil.ReadFile(s.userDataPath(QQSessionTokenFilename)); err == nil {
 			r := binary.NewReader(sessionTokenData)
 			sessionTokenAccount := r.ReadInt64()
@@ -821,6 +894,10 @@ func (s *Service) handleQQGroupMessageRecalled(client *mirai.QQClient, event *mi
 		return
 	}
 	s.logger.Debugf("qq message recalled: %v\n", event.MessageId)
+
+	if s.redisClient == nil {
+		return
+	}
 
 	recallTask := func() {
 		messageId := event.MessageId
