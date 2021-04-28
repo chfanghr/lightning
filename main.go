@@ -319,7 +319,32 @@ func (s *Service) reportForwardFromQQToTelegram(qqMessageId int32, forwarded int
 		}
 	}
 
-	s.logger.Errorf("qq message %v forwarded to telegram: %v", qqMessageId, forwardedMessageIds)
+	s.logger.Infof("qq message %v forwarded to telegram: %v", qqMessageId, forwardedMessageIds)
+	s.recordForwardFromQQToTelegram(qqMessageId, forwardedMessageIds)
+}
+
+const QQMessageRecallExpireTime = time.Minute * 2
+
+const QQToTelegramRedisRecordKeyFormat = "qq2tg:%d"
+
+func (s *Service) recordForwardFromQQToTelegram(qqMessageId int32, forwardedTelegramMessageIds []int) {
+	if s.redisClient == nil {
+		return
+	}
+	recordKey := fmt.Sprintf(QQToTelegramRedisRecordKeyFormat, qqMessageId)
+	pipeline := s.redisClient.Pipeline()
+	for _, id := range forwardedTelegramMessageIds {
+		pipeline.RPush(s.redisClient.Context(), recordKey, id)
+	}
+	pipeline.Expire(s.redisClient.Context(), recordKey, QQMessageRecallExpireTime)
+	go func() {
+		_, err := pipeline.Exec(s.redisClient.Context())
+		if err != nil {
+			s.logger.Warningf("failed to record qq to telegram message: %v", err)
+		} else {
+			s.logger.Infof("qq to telegram message recorded")
+		}
+	}()
 }
 
 func (s *Service) telegramMessageSender() {
@@ -750,15 +775,7 @@ loginSuccess:
 		s.qqClient.OnSelfGroupMessage(s.handleQQGroupMessage)
 	}
 	s.qqClient.OnLog(s.handleQQLog)
-	s.qqClient.OnGroupMessageRecalled(func(client *mirai.QQClient, event *mirai.GroupMessageRecalledEvent) {
-		precondition(client == s.qqClient)
-
-		if event.GroupCode != s.config.QQ.GroupId {
-			return
-		}
-
-		s.logger.Debugf("qq message recalled: %v\n", event.MessageId)
-	})
+	s.qqClient.OnGroupMessageRecalled(s.handleQQGroupMessageRecalled)
 
 	if err := ioutil.WriteFile(s.userDataPath(QQSessionTokenFilename), s.qqClient.GenToken(), 0600); err != nil {
 		s.logger.Warningf("failed to persist session token: %v", err)
@@ -787,6 +804,49 @@ const QQToTelegramMessageHeaderFormat = "%s(%v) said:\n"
 
 func makeQQToTelegramMessageHeader(message *miraiMessage.GroupMessage) string {
 	return fmt.Sprintf(QQToTelegramMessageHeaderFormat, message.Sender.Nickname, message.Sender.Uin)
+}
+
+type telegramToRecallMessage struct {
+	messageID string
+	chatID    int64
+}
+
+func (t telegramToRecallMessage) MessageSig() (messageID string, chatID int64) {
+	return t.messageID, t.chatID
+}
+
+func (s *Service) handleQQGroupMessageRecalled(client *mirai.QQClient, event *mirai.GroupMessageRecalledEvent) {
+	precondition(client == s.qqClient)
+	if event.GroupCode != s.config.QQ.GroupId {
+		return
+	}
+	s.logger.Debugf("qq message recalled: %v\n", event.MessageId)
+
+	recallTask := func() {
+		messageId := event.MessageId
+		recordKey := fmt.Sprintf(QQToTelegramRedisRecordKeyFormat, messageId)
+
+		result, err := s.redisClient.LRange(s.redisClient.Context(), recordKey, 0, -1).Result()
+		if err != nil {
+			s.logger.Warningf("cannot recall qq message %v from telegram: %v", messageId, err)
+		}
+
+		for _, telegramMessageId := range result {
+			err := s.telegramBot.Delete(telegramToRecallMessage{
+				messageID: telegramMessageId,
+				chatID:    s.telegramChat.ID,
+			})
+			if err != nil {
+				log.Warningf("cannot recall qq message %v from telegram", err)
+			} else {
+				log.Infof("recalled qq message %v from telegram: %v", messageId, telegramMessageId)
+			}
+		}
+
+		s.redisClient.Del(s.redisClient.Context(), recordKey)
+	}
+
+	go recallTask()
 }
 
 func (s *Service) handleQQGroupMessage(client *mirai.QQClient, message *miraiMessage.GroupMessage) {
