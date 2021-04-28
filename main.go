@@ -163,6 +163,9 @@ func NewServiceFromConfig(config *Config) (*Service, error) {
 	if err := s.makeUserDataDirectoryIfNeeded(); err != nil {
 		return nil, err
 	}
+	if err := s.makeSubfolderInUserDataIfNeeded(TelegramStickerCacheFolder); err != nil {
+		s.logger.Warningf("failed to create sticker cache folder: %v", err)
+	}
 
 	if err := s.reportIfError(s.setupTelegramBot()); err != nil {
 		return nil, err
@@ -434,7 +437,7 @@ const QQDeviceProtocol = mirai.MacOS
 
 const TryLimit = 10
 
-func (s *Service) userDataPath(filename string) string {
+func (s *Service) getUserDataPath(filename string) string {
 	return path.Join(s.config.UserDataFolder, filename)
 }
 
@@ -503,6 +506,8 @@ func (s *Service) setupTelegramBot() error {
 
 	s.telegramBot.Handle(tb.OnText, s.handleTelegramTextMessage)
 	s.telegramBot.Handle(tb.OnPhoto, s.handleTelegramImageMessage)
+	s.telegramBot.Handle(tb.OnSticker, s.handleTelegramStickerMessage)
+
 	s.telegramBot.Handle(TelegramRecallMessageCommand, s.handleTelegramRecallCommand)
 
 	return nil
@@ -573,53 +578,61 @@ func (s *Service) handleTelegramTextMessage(m *tb.Message) {
 	}
 }
 
-func (s *Service) handleTelegramImageMessage(m *tb.Message) {
-	type imageElementOrError struct {
-		imageElement *miraiMessage.GroupImageElement
-		imageCaption string
-		err          error
+type qqGroupImageElementOrError struct {
+	imageElement *miraiMessage.GroupImageElement
+	imageCaption string
+	err          error
+}
+
+func (s *Service) uploadQQGroupImage(data []byte) (*miraiMessage.GroupImageElement, error) {
+	readSeeker := bytes.NewReader(data)
+
+	var groupImageElement *miraiMessage.GroupImageElement
+	var err error
+
+	for i := 0; i < TryLimit; i++ {
+		groupImageElement, err = s.qqClient.UploadGroupImage(s.config.QQ.GroupId, readSeeker)
+		if err != nil {
+			s.logger.Warningf("failed to upload qq group image: %v", err)
+			continue
+		}
+		break
 	}
 
-	imageChan := make(chan imageElementOrError)
+	if err != nil {
+		err = fmt.Errorf("upload qq group image: %v", err)
+	}
+
+	return groupImageElement, err
+}
+
+func (s *Service) handleTelegramImageMessage(m *tb.Message) {
+	imageChan := make(chan *qqGroupImageElementOrError)
 
 	imageDownloader := func() {
+		defer close(imageChan)
 		reader, err := s.telegramBot.GetFile(m.Photo.MediaFile())
 		if err != nil {
-			imageChan <- imageElementOrError{
+			imageChan <- &qqGroupImageElementOrError{
 				err: fmt.Errorf("failed to download telegram photo: %w", err),
 			}
 		}
 
 		data, err := ioutil.ReadAll(reader)
 		if err != nil {
-			imageChan <- imageElementOrError{
+			imageChan <- &qqGroupImageElementOrError{
 				err: fmt.Errorf("failed to download telegram photo: %w", err),
 			}
 		}
 
-		readSeeker := bytes.NewReader(data)
-
-		var groupImageElement *miraiMessage.GroupImageElement
-
-		for i := 0; i < TryLimit; i++ {
-			groupImageElement, err = s.qqClient.UploadGroupImage(s.config.QQ.GroupId, readSeeker)
-			if err != nil {
-				s.logger.Warningf("failed to upload qq group image: %v", err)
-				continue
-			}
-			imageChan <- imageElementOrError{
-				imageElement: groupImageElement,
-				imageCaption: m.Caption,
-			}
-			return
-		}
-
-		if err != nil {
-			imageChan <- imageElementOrError{
-				err: fmt.Errorf("failed to upload qq group message: %w", err),
-			}
+		groupImageElement, err := s.uploadQQGroupImage(data)
+		imageChan <- &qqGroupImageElementOrError{
+			imageElement: groupImageElement,
+			imageCaption: m.Caption,
+			err:          err,
 		}
 	}
+
 	go imageDownloader()
 
 	messageGenerator := func() (*miraiMessage.SendingMessage, error) {
@@ -641,11 +654,111 @@ func (s *Service) handleTelegramImageMessage(m *tb.Message) {
 	}
 }
 
+func (s *Service) makeSubfolderInUserDataIfNeeded(folder string) error {
+	if !isFileOrFolderExists(s.getUserDataPath(folder)) {
+		return os.MkdirAll(s.getUserDataPath(folder), 0700)
+	}
+	return nil
+}
+
+const TelegramStickerCacheFolder = "cache/telegram/stickers"
+
+func (s *Service) getStickerCachePath(sticker *tb.Sticker) string {
+	return s.getUserDataPath(path.Join(TelegramStickerCacheFolder, sticker.UniqueID))
+}
+func (s *Service) lookupTelegramStickerInCache(sticker *tb.Sticker) []byte {
+	var data []byte
+	var err error
+
+	cacheFilePath := s.getStickerCachePath(sticker)
+
+	if isFileOrFolderExists(cacheFilePath) {
+		if data, err = ioutil.ReadFile(cacheFilePath); err != nil {
+			s.logger.Warningf("failed to read cache file %v: %v", cacheFilePath, err)
+			return nil
+		}
+	} else {
+		s.logger.Debugf("sticker %v not found in cache", sticker.UniqueID)
+	}
+
+	return data
+}
+
+func (s *Service) storeTelegramStickerToCache(sticker *tb.Sticker, data []byte) {
+	cacheFilePath := s.getStickerCachePath(sticker)
+
+	if err := ioutil.WriteFile(cacheFilePath, data, 0600); err != nil {
+		s.logger.Warningf("failed to store sticker %v: %v", sticker.UniqueID, err)
+	}
+}
+
+func (s *Service) getTelegramStickerData(sticker *tb.Sticker) ([]byte, error) {
+	if data := s.lookupTelegramStickerInCache(sticker); data != nil {
+		return data, nil
+	}
+
+	reader, err := s.telegramBot.GetFile(&sticker.File)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file from telegram: %v", err)
+	}
+
+	data, err := ioutil.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read data: %v", err)
+	}
+
+	go s.storeTelegramStickerToCache(sticker, data)
+
+	return data, nil
+}
+
+func (s *Service) handleTelegramStickerMessage(m *tb.Message) {
+	imageChan := make(chan *qqGroupImageElementOrError)
+
+	fetchSticker := func() {
+		defer close(imageChan)
+
+		data, err := s.getTelegramStickerData(m.Sticker)
+		if err != nil {
+			s.logger.Errorf("failed to get telegram sticker %v: %v", m.Sticker.UniqueID, err)
+			imageChan <- &qqGroupImageElementOrError{err: err}
+			return
+		}
+
+		element, err := s.uploadQQGroupImage(data)
+		imageChan <- &qqGroupImageElementOrError{
+			imageElement: element,
+			imageCaption: m.Sticker.Emoji,
+			err:          err,
+		}
+	}
+
+	go fetchSticker()
+
+	messageGenerator := func() (*miraiMessage.SendingMessage, error) {
+		stickerResult := <-imageChan
+		if stickerResult.err != nil {
+			return nil, stickerResult.err
+		}
+
+		var message = miraiMessage.NewSendingMessage()
+		message.Append(miraiMessage.NewText(makeTelegramToQQMessageHeader(m) + stickerResult.imageCaption))
+		message.Append(stickerResult.imageElement)
+
+		return message, nil
+	}
+
+	s.qqToSendMessageChannel <- &qqToSendMessage{
+		originalTelegramMessageId: m.ID,
+		toSend:                    messageGenerator,
+	}
+}
+
 func (s *Service) loadQQDeviceInformation() {
 	mirai.SystemDeviceInfo.Protocol = QQDeviceProtocol
 
-	if isFileOrFolderExists(s.userDataPath(QQDeviceInformationFilename)) {
-		if content, err := ioutil.ReadFile(s.userDataPath(QQDeviceInformationFilename)); err == nil {
+	if isFileOrFolderExists(s.getUserDataPath(QQDeviceInformationFilename)) {
+		if content, err := ioutil.ReadFile(s.getUserDataPath(QQDeviceInformationFilename)); err == nil {
 			if mirai.SystemDeviceInfo.ReadJson(content) == nil {
 				return
 			}
@@ -653,7 +766,7 @@ func (s *Service) loadQQDeviceInformation() {
 	}
 
 	mirai.GenRandomDevice()
-	err := ioutil.WriteFile(s.userDataPath(QQDeviceInformationFilename), mirai.SystemDeviceInfo.ToJson(), 0600)
+	err := ioutil.WriteFile(s.getUserDataPath(QQDeviceInformationFilename), mirai.SystemDeviceInfo.ToJson(), 0600)
 	if err != nil {
 		s.logger.Warningf("failed to presist device information: %v", err)
 	}
@@ -788,13 +901,13 @@ func (s *Service) loginQQAccountUsingSessionToken() error {
 	shouldRemoveCurrentSessionToken := true
 	defer func() {
 		if shouldRemoveCurrentSessionToken {
-			_ = os.Remove(s.userDataPath(QQSessionTokenFilename))
+			_ = os.Remove(s.getUserDataPath(QQSessionTokenFilename))
 		}
 	}()
 
-	if isFileOrFolderExists(s.userDataPath(QQSessionTokenFilename)) {
+	if isFileOrFolderExists(s.getUserDataPath(QQSessionTokenFilename)) {
 		s.logger.Info("qq session token file found")
-		if sessionTokenData, err := ioutil.ReadFile(s.userDataPath(QQSessionTokenFilename)); err == nil {
+		if sessionTokenData, err := ioutil.ReadFile(s.getUserDataPath(QQSessionTokenFilename)); err == nil {
 			r := binary.NewReader(sessionTokenData)
 			sessionTokenAccount := r.ReadInt64()
 			if s.config.QQ.Account != 0 && sessionTokenAccount == s.config.QQ.Account {
@@ -850,7 +963,7 @@ loginSuccess:
 	s.qqClient.OnLog(s.handleQQLog)
 	s.qqClient.OnGroupMessageRecalled(s.handleQQGroupMessageRecalled)
 
-	if err := ioutil.WriteFile(s.userDataPath(QQSessionTokenFilename), s.qqClient.GenToken(), 0600); err != nil {
+	if err := ioutil.WriteFile(s.getUserDataPath(QQSessionTokenFilename), s.qqClient.GenToken(), 0600); err != nil {
 		s.logger.Warningf("failed to persist session token: %v", err)
 	}
 
@@ -1037,6 +1150,7 @@ func (s *Service) Run(handleSignals bool) error {
 
 func (s *Service) handleSignals() {
 	signalChannel := make(chan os.Signal)
+	signal.Ignore(os.Interrupt, os.Kill)
 	signal.Notify(signalChannel, os.Interrupt, os.Kill)
 
 	for {
