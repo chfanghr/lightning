@@ -183,6 +183,8 @@ func NewServiceFromConfig(config *Config) (*Service, error) {
 	return s, nil
 }
 
+const RedisVersionPrefix = "redis_version:"
+
 func (s *Service) setupRedisDatabase() (err error) {
 	var options *redis.Options
 
@@ -208,7 +210,17 @@ func (s *Service) setupRedisDatabase() (err error) {
 	if err != nil {
 		return fmt.Errorf("failed to get redis server information: %w", err)
 	}
-	log.Infof("redis server connected: %v", serverInfo.(string))
+	scanner := bufio.NewScanner(strings.NewReader(serverInfo.(string)))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, RedisVersionPrefix) {
+			version := strings.TrimPrefix(line, RedisVersionPrefix)
+			version = strings.TrimRight(version, "\r\n")
+			log.Infof("redis server connected: %v", version)
+			break
+		}
+	}
+
 	return nil
 }
 
