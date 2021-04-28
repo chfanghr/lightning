@@ -810,10 +810,8 @@ generateAndPresentQrCode:
 		prevStatus = qrStatus.State
 
 		switch qrStatus.State {
-		case mirai.QRCodeTimeout:
+		case mirai.QRCodeTimeout, mirai.QRCodeCanceled:
 			goto generateAndPresentQrCode
-		case mirai.QRCodeCanceled:
-			continue
 		case mirai.QRCodeWaitingForConfirm:
 			fmt.Println("Please confirm on your phone")
 			continue
