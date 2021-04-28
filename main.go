@@ -713,6 +713,11 @@ func (s *Service) getTelegramStickerData(sticker *tb.Sticker) ([]byte, error) {
 }
 
 func (s *Service) handleTelegramStickerMessage(m *tb.Message) {
+	if m.Sticker.Animated {
+		s.logger.Warningf("qq doesn't support animated sticker")
+		return
+	}
+
 	imageChan := make(chan *qqGroupImageElementOrError)
 
 	fetchSticker := func() {
