@@ -610,7 +610,6 @@ func (s *Service) handleTelegramImageMessage(m *tb.Message) {
 	imageChan := make(chan *qqGroupImageElementOrError)
 
 	imageDownloader := func() {
-		defer close(imageChan)
 		reader, err := s.telegramBot.GetFile(m.Photo.MediaFile())
 		if err != nil {
 			imageChan <- &qqGroupImageElementOrError{
@@ -717,8 +716,6 @@ func (s *Service) handleTelegramStickerMessage(m *tb.Message) {
 	imageChan := make(chan *qqGroupImageElementOrError)
 
 	fetchSticker := func() {
-		defer close(imageChan)
-
 		data, err := s.getTelegramStickerData(m.Sticker)
 		if err != nil {
 			s.logger.Errorf("failed to get telegram sticker %v: %v", m.Sticker.UniqueID, err)
@@ -738,6 +735,9 @@ func (s *Service) handleTelegramStickerMessage(m *tb.Message) {
 
 	messageGenerator := func() (*miraiMessage.SendingMessage, error) {
 		stickerResult := <-imageChan
+		if stickerResult == nil {
+			return nil, fmt.Errorf("unknown error")
+		}
 		if stickerResult.err != nil {
 			return nil, stickerResult.err
 		}
