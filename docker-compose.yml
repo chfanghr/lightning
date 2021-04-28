@@ -8,3 +8,9 @@ services:
       - "./config.json:/config.json:ro"
       - "./userdata:/userdata"
     restart: always
+    environment:
+      - REDIS_URL=redis://redis:6379
+  redis:
+    container_name: redis
+    image: redis
+    restart: always

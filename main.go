@@ -185,8 +185,17 @@ func NewServiceFromConfig(config *Config) (*Service, error) {
 
 const RedisVersionPrefix = "redis_version:"
 
+const RedisUrlEnvKey = "REDIS_URL"
+
 func (s *Service) setupRedisDatabase() (err error) {
 	var options *redis.Options
+
+	if s.config.Redis.Url == "" {
+		if envRedisUrl := os.Getenv(RedisUrlEnvKey); envRedisUrl != "" {
+			s.logger.Infof("using redis url from environment: %s", envRedisUrl)
+			s.config.Redis.Url = envRedisUrl
+		}
+	}
 
 	if s.config.Redis.Url != "" {
 		options, err = redis.ParseURL(s.config.Redis.Url)
