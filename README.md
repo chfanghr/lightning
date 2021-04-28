@@ -7,4 +7,5 @@ The purpose of this project is to forward messages between a `qq` group and a `t
 # Features
 
 * Forward text messages
-* Forward images 
+* Forward images
+* Recall messages from both telegram and qq
