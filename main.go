@@ -524,7 +524,7 @@ func (s *Service) handleTelegramRecallCommand(m *tb.Message) {
 		}
 	}
 
-	if m.ReplyTo == nil {
+	if m.ReplyTo == nil || m.Sender.ID != m.ReplyTo.Sender.ID {
 		cleanUp()
 		return
 	}
@@ -666,6 +666,7 @@ const TelegramStickerCacheFolder = "cache/telegram/stickers"
 func (s *Service) getStickerCachePath(sticker *tb.Sticker) string {
 	return s.getUserDataPath(path.Join(TelegramStickerCacheFolder, sticker.UniqueID))
 }
+
 func (s *Service) lookupTelegramStickerInCache(sticker *tb.Sticker) []byte {
 	var data []byte
 	var err error
