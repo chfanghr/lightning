@@ -240,7 +240,7 @@ func (s *Service) qqMessageSender() {
 			for i := 0; i < TryLimit; i++ {
 				message, err = generatorFunc()
 				if err != nil {
-					s.logger.Warningf("failed to generate qq message: %v\n", err)
+					s.logger.Warningf("failed to generate qq message: %v", err)
 				} else {
 					break
 				}
@@ -275,7 +275,7 @@ func (s *Service) qqMessageSender() {
 			sendMessage(toSend)
 		default:
 			if err := s.ensureQQClientIsOnline(); err != nil {
-				s.logger.Warningf("qq client is not online: %v\n", err)
+				s.logger.Warningf("qq client is not online: %v", err)
 			}
 		}
 	}
@@ -283,7 +283,7 @@ func (s *Service) qqMessageSender() {
 
 func (s *Service) reportForwardFromQQToTelegram(qqMessageId int32, forwarded interface{}, err error) {
 	if err != nil {
-		s.logger.Errorf("failed to forward qq message %v: %v\n", qqMessageId, err)
+		s.logger.Errorf("failed to forward qq message %v: %v", qqMessageId, err)
 		return
 	}
 
@@ -298,7 +298,7 @@ func (s *Service) reportForwardFromQQToTelegram(qqMessageId int32, forwarded int
 		}
 	}
 
-	s.logger.Errorf("qq message %v forwarded to telegram: %v\n", qqMessageId, forwardedMessageIds)
+	s.logger.Errorf("qq message %v forwarded to telegram: %v", qqMessageId, forwardedMessageIds)
 }
 
 func (s *Service) telegramMessageSender() {
@@ -403,7 +403,7 @@ func (s *Service) setupTelegramBot() error {
 		}
 		if !update.Message.Sender.IsBot &&
 			update.Message.Chat.ID == s.config.Telegram.ChatId {
-			s.logger.Infof("telegram message received: %v\n", update.Message.ID)
+			s.logger.Infof("telegram message received: %v", update.Message.ID)
 			return true
 		}
 		return false
@@ -430,7 +430,7 @@ func (s *Service) setupTelegramBot() error {
 		return fmt.Errorf("failed to find telegram chat: %w", err)
 	}
 
-	s.logger.Infof("telegram chat found: %s(%v)\n", s.telegramChat.Title, s.telegramChat.ID)
+	s.logger.Infof("telegram chat found: %s(%v)", s.telegramChat.Title, s.telegramChat.ID)
 
 	s.telegramBot.Handle(tb.OnText, s.handleTelegramTextMessage)
 	s.telegramBot.Handle(tb.OnPhoto, s.handleTelegramImageMessage)
@@ -637,7 +637,7 @@ func (s *Service) handleQQLoginResponse(loginResp *mirai.LoginResponse) (loginEr
 			if !s.qqClient.RequestSMS() {
 				return fmt.Errorf("unable to request sms code")
 			}
-			fmt.Printf("sms code has been sent to: %v\n", loginResp.SMSPhone)
+			fmt.Printf("sms code has been sent to: %v", loginResp.SMSPhone)
 			fmt.Print("Type sms code and hit enter: ")
 
 			//goland:noinspection GoNilness
@@ -722,7 +722,7 @@ func (s *Service) setupQQClient() error {
 	}
 
 loginSuccess:
-	s.logger.Infof("qq login success: %s(%v)\n", s.qqClient.Nickname, s.qqClient.Uin)
+	s.logger.Infof("qq login success: %s(%v)", s.qqClient.Nickname, s.qqClient.Uin)
 
 	s.qqClient.OnGroupMessage(s.handleQQGroupMessage)
 	if s.config.Debug.QQDontFilterYourself {
@@ -759,7 +759,7 @@ func (s *Service) handleQQLog(client *mirai.QQClient, e *mirai.LogEvent) {
 		logLevel = log.DebugLevel
 	}
 
-	s.logger.Logf(logLevel, "qq client: %v\n", e.Message)
+	s.logger.Logf(logLevel, "qq client: %v", e.Message)
 }
 
 const QQToTelegramMessageHeaderFormat = "%s(%v) said:\n"
@@ -774,7 +774,7 @@ func (s *Service) handleQQGroupMessage(client *mirai.QQClient, message *miraiMes
 		(!s.config.Debug.QQDontFilterYourself && message.Sender.Uin == s.qqClient.Uin) {
 		return
 	}
-	s.logger.Infof("qq group message received: %v\n", message.Id)
+	s.logger.Infof("qq group message received: %v", message.Id)
 
 	s.composeAndSendTelegramMessage(message)
 }
@@ -843,7 +843,7 @@ func (s *Service) Stop() {
 
 	if s.redisClient != nil {
 		if err := s.redisClient.Close(); err != nil {
-			s.logger.Warningf("failed to colse redis client: %v\n", err)
+			s.logger.Warningf("failed to colse redis client: %v", err)
 		}
 	}
 
@@ -884,7 +884,7 @@ func (s *Service) handleSignals() {
 	for {
 		select {
 		case sig := <-signalChannel:
-			s.logger.Infof("exit signal received: %v\n", sig)
+			s.logger.Infof("exit signal received: %v", sig)
 			s.Stop()
 			return
 		case <-s.context.Done():
