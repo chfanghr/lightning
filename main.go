@@ -391,7 +391,7 @@ func (s *Service) telegramMessageSender() {
 }
 
 func (s *Service) reportForwardFromTelegramToQQ(telegramMessageId int, qqGroupMessage *miraiMessage.GroupMessage, err error) {
-	if err != nil {
+	if err != nil || qqGroupMessage == nil || qqGroupMessage.Id == -1 {
 		s.logger.Errorf("failed to forward telegram message %v: %v", telegramMessageId, err)
 		return
 	}
