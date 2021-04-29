@@ -6,10 +6,18 @@ The purpose of this project is to forward messages between a `qq` group and a `t
 
 # Features
 
-* Forward text messages
-* Forward images
-* Recall messages from both telegram and qq
-* Forward telegram stickers
+- [x] Forward text messages
+- [x] Forward images
+- [x] Recall messages from both `telegram` and `qq`
+- [x] Forward telegram static stickers(including `gif`s)
+- [ ] Forward telegram tgs/animated stickers(WIP)
+
+# Troubleshooting
+
+* The program always fails to send (text) messages to qq:
+    - remove `session.token` and `device.json` in the `userdata` folder
+    - restart the program
+    - login to qq again
 
 # License
 
