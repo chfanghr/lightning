@@ -31,6 +31,14 @@ The purpose of this project is to forward messages between a `qq` group and a `t
     - restart services using `docker-compose restart`
     - log in to `qq` (if needed) again
 
+## Related Projects
+
+* [MiraiGo](https://github.com/Mrs4s/MiraiGo/) is a state-of-the-art reverse-engineered project. It provides unofficial
+  qq apis.
+* [telebot](https://github.com/tucnak/telebot) is a really nice telegram bot api framework.
+* [rlottie-to-gif-api](https://github.com/chfanghr/rlottie-to-gif-api) converts telegram animated stickers to gif images
+  so that we can send them to qq.
+
 ## License
 
 Licensed under the [MIT](LICENSE) license.
