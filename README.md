@@ -20,7 +20,7 @@ The purpose of this project is to forward messages between a `qq` group and a `t
 - [x] Forward images
 - [x] Recall messages from both `telegram` and `qq`
 - [x] Forward telegram static stickers(including `gif`s)
-- [ ] Forward telegram tgs/animated stickers(WIP)
+- [x] Forward telegram tgs/animated stickers
 
 ## Troubleshooting
 
