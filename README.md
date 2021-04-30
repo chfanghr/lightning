@@ -1,6 +1,4 @@
-# lightning [![Go](https://github.com/chfanghr/lightning/actions/workflows/go.yml/badge.svg)](https://github.com/chfanghr/lightning/actions/workflows/go.yml)
-
-This is a ***WIP*** project.
+# lightning [![stability-wip](https://img.shields.io/badge/stability-wip-lightgrey.svg)](https://github.com/mkenney/software-guides/blob/master/STABILITY-BADGES.md#work-in-progress) [![Go](https://github.com/chfanghr/lightning/actions/workflows/go.yml/badge.svg)](https://github.com/chfanghr/lightning/actions/workflows/go.yml)
 
 The purpose of this project is to forward messages between a `qq` group and a `telegram` group.
 
@@ -23,7 +21,7 @@ The purpose of this project is to forward messages between a `qq` group and a `t
 - [x] Recall messages from both `telegram` and `qq`
 - [x] Forward telegram static stickers(including `gif`s)
 - [x] Forward telegram tgs/animated stickers
-
+- [ ] Relpy to forwarded messages (wip)
 ## Troubleshooting
 
 * The program always fails to send (text) messages to qq:
