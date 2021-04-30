@@ -17,6 +17,9 @@ import (
 	"github.com/tuotoo/qrcode"
 	asciiArt "github.com/yinghau76/go-ascii-art"
 	tb "gopkg.in/tucnak/telebot.v2"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 	"image"
 	_ "image/jpeg"
 	"io/ioutil"
@@ -80,7 +83,12 @@ type Config struct {
 	Debug struct {
 		Verbose              bool `json:"verbose,omitempty"`
 		QQDontFilterYourself bool `json:"qq_dont_filter_yourself"`
-	} `json:"debug"`
+	} `json:"debug,omitempty"`
+
+	Database struct {
+		Kind string `json:"kind"` // Could be sqlite or mysql
+		DSN  string `json:"dsn,omitempty"`
+	} `json:"database,omitempty"`
 
 	Redis struct {
 		Url string `json:"redis_url,omitempty"`
@@ -91,7 +99,7 @@ type Config struct {
 		Password string `json:"password,omitempty"`
 	} `json:"redis,omitempty"`
 
-	RlottieRenderServiceEndpoint string `json:"rlottie_render_service_endpoint"`
+	RlottieRenderServiceEndpoint string `json:"rlottie_render_service_endpoint,omitempty"`
 
 	Headless bool `json:"headless,omitempty"`
 
@@ -135,6 +143,8 @@ type Service struct {
 	workerWaitGroup sync.WaitGroup
 
 	redisClient *redis.Client
+
+	sqlDB *gorm.DB
 }
 
 type qqToSendMessage struct {
@@ -185,11 +195,56 @@ func NewServiceFromConfig(config *Config) (*Service, error) {
 	if err := s.setupRedisDatabase(); err != nil {
 		s.redisClient = nil
 		log.Warningf("failed to setup redis: %v", err)
+		log.Warningf("feature(s) that will be unusable: recall messages")
+	}
+
+	if err := s.setupSqlDatabase(); err != nil {
+		s.sqlDB = nil
+		log.Warningf("failed to setup sql database: %v", err)
+		log.Warningf("feature(s) that will be unusable: reply messages")
 	}
 
 	s.detectRlottieRenderServiceEndpointFromEnvironmentIfNeeded()
 
 	return s, nil
+}
+
+const DefaultSqliteDatabaseFilename = "lightning.db"
+
+const MysqlDatabaseKind = "mysql"
+const SqliteDatabaseKind = "sqlite"
+
+const MysqlDatabaseDSNEnvKey = "MYSQL_DATABASE_DSN"
+
+func (s *Service) setDefaultDatabase() {
+	s.config.Database.Kind = SqliteDatabaseKind
+	s.config.Database.DSN = s.getUserDataPath(DefaultSqliteDatabaseFilename)
+	s.logger.Warningf("using deafult sqlite database, performance may be impact")
+}
+
+func (s *Service) setupSqlDatabase() error {
+	if s.config.Database.DSN == "" {
+		if envVar := os.Getenv(MysqlDatabaseDSNEnvKey); envVar != "" {
+			s.config.Database.Kind = MysqlDatabaseKind
+			s.config.Database.DSN = envVar
+			s.logger.Warningf("using mysql database config from environment: %v", envVar)
+		} else {
+			s.setDefaultDatabase()
+		}
+	}
+
+	var err error
+
+	switch s.config.Database.Kind {
+	case MysqlDatabaseKind:
+		s.sqlDB, err = gorm.Open(mysql.Open(s.config.Database.DSN), &gorm.Config{})
+	case SqliteDatabaseKind:
+		s.sqlDB, err = gorm.Open(sqlite.Open(s.config.Database.DSN), &gorm.Config{})
+	default:
+		err = fmt.Errorf("unsupported database kind: %v", s.config.Database.Kind)
+	}
+
+	return err
 }
 
 const RlottieRenderServiceEndpointEnvKey = "RLOTTIE_RENDER_SERVICE_API_ENDPOINT"

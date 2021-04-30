@@ -11,6 +11,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
       - RLOTTIE_RENDER_SERVICE_API_ENDPOINT=http://rlottieRenderService:8000
+      - MYSQL_DATABASE_DSN=lightning_user:lightning_password@tcp(db:3306)/lightning?charset=utf8mb4&parseTime=True&loc=Local
   redis:
     container_name: redis
     image: redis
@@ -20,3 +21,12 @@ services:
     build: ./rlottie-to-gif-api
     image: rlottie-to-gif-api
     restart: always
+  mysql:
+    container_name: db
+    image: mysql
+    command: --default-authentication-plugin=mysql_native_password
+    restart: always
+    environment:
+      - MYSQL_DATABASE=lightning
+      - MYSQL_USER=lightning_user
+      - MYSQL_PASSWORD=lightning_password

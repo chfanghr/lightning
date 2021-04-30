@@ -14,4 +14,7 @@ require (
 	github.com/yinghau76/go-ascii-art v0.0.0-20190517192627-e7f465a30189
 	gopkg.in/tucnak/telebot.v2 v2.3.5
 	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b // indirect
+	gorm.io/driver/mysql v1.0.6
+	gorm.io/driver/sqlite v1.1.4
+	gorm.io/gorm v1.21.9
 )
