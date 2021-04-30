@@ -26,7 +26,10 @@ services:
     image: mysql
     command: --default-authentication-plugin=mysql_native_password
     restart: always
+    volumes:
+      - "./userdata/mysql:/var/lib/mysql"
     environment:
       - MYSQL_DATABASE=lightning
       - MYSQL_USER=lightning_user
       - MYSQL_PASSWORD=lightning_password
+      - MYSQL_ROOT_PASSWORD=password
