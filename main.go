@@ -237,7 +237,13 @@ func (s *Service) setupSqlDatabase() error {
 
 	switch s.config.Database.Kind {
 	case MysqlDatabaseKind:
-		s.sqlDB, err = gorm.Open(mysql.Open(s.config.Database.DSN), &gorm.Config{})
+		for i := 0; i < TryLimit; i++ {
+			s.sqlDB, err = gorm.Open(mysql.Open(s.config.Database.DSN), &gorm.Config{})
+			if err == nil {
+				break
+			}
+			time.Sleep(3 * time.Second)
+		}
 	case SqliteDatabaseKind:
 		s.sqlDB, err = gorm.Open(sqlite.Open(s.config.Database.DSN), &gorm.Config{})
 	default:
