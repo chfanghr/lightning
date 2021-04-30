@@ -10,12 +10,13 @@ services:
     restart: always
     environment:
       - REDIS_URL=redis://redis:6379
+      - RLOTTIE_RENDER_SERVICE_API_ENDPOINT=http://rlottieRenderService:8000
   redis:
     container_name: redis
     image: redis
     restart: always
   rlottie-to-gif-api:
-    container_name: tgsRenderService
+    container_name: rlottieRenderService
     build: ./rlottie-to-gif-api
     image: rlottie-to-gif-api
     restart: always

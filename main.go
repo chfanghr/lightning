@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -89,6 +90,8 @@ type Config struct {
 		Username string `json:"username,omitempty"`
 		Password string `json:"password,omitempty"`
 	} `json:"redis,omitempty"`
+
+	RlottieRenderServiceEndpoint string `json:"rlottie_render_service_endpoint"`
 
 	Headless bool `json:"headless,omitempty"`
 
@@ -184,7 +187,19 @@ func NewServiceFromConfig(config *Config) (*Service, error) {
 		log.Warningf("failed to setup redis: %v", err)
 	}
 
+	s.detectRlottieRenderServiceEndpointFromEnvironmentIfNeeded()
+
 	return s, nil
+}
+
+const RlottieRenderServiceEndpointEnvKey = "RLOTTIE_RENDER_SERVICE_API_ENDPOINT"
+
+func (s *Service) detectRlottieRenderServiceEndpointFromEnvironmentIfNeeded() {
+	if s.config.RlottieRenderServiceEndpoint == "" {
+		if envVar := os.Getenv(RlottieRenderServiceEndpointEnvKey); envVar != "" {
+			s.config.RlottieRenderServiceEndpoint = envVar
+		}
+	}
 }
 
 const RedisVersionPrefix = "redis_version:"
@@ -663,7 +678,11 @@ func (s *Service) makeSubfolderInUserDataIfNeeded(folder string) error {
 const TelegramStickerCacheFolder = "cache/telegram/stickers"
 
 func (s *Service) getStickerCachePath(sticker *tb.Sticker) string {
-	return s.getUserDataPath(path.Join(TelegramStickerCacheFolder, sticker.UniqueID))
+	key := sticker.UniqueID
+	if sticker.Animated {
+		key += ".gif"
+	}
+	return s.getUserDataPath(path.Join(TelegramStickerCacheFolder, key))
 }
 
 func (s *Service) lookupTelegramStickerInCache(sticker *tb.Sticker) []byte {
@@ -692,6 +711,67 @@ func (s *Service) storeTelegramStickerToCache(sticker *tb.Sticker, data []byte) 
 	}
 }
 
+type tgsRenderRequest struct {
+	Width       uint32  `json:"width"`
+	Height      uint32  `json:"height"`
+	Fps         float64 `json:"fps"`
+	IsTgs       bool    `json:"is_tgs"`
+	RlottieData string  `json:"rlottie_data"` // base64 encoded data
+}
+
+const DefaultGifWidth = 200
+const DefaultGifHeight = 200
+const DefaultGifFps = 60.0
+
+func (t *tgsRenderRequest) toJson() []byte {
+	data, err := json.Marshal(*t)
+	preconditionNoError(err)
+	return data
+}
+
+func newDefaultTgsRenderRequest(tgsData []byte) *tgsRenderRequest {
+	return &tgsRenderRequest{
+		Width:       DefaultGifWidth,
+		Height:      DefaultGifHeight,
+		Fps:         DefaultGifFps,
+		IsTgs:       true,
+		RlottieData: base64.RawStdEncoding.EncodeToString(tgsData),
+	}
+}
+
+type tgsRenderError struct {
+	Reason string `json:"reason"`
+}
+
+type tgsRenderResult struct {
+	Error   *tgsRenderError `json:"error"`
+	GifData []byte          `json:"gif_data"`
+}
+
+func (s *Service) convertTgsToGif(data []byte) ([]byte, error) {
+	requestBody := newDefaultTgsRenderRequest(data).toJson()
+	req, err := http.NewRequest("POST", s.config.RlottieRenderServiceEndpoint, bytes.NewBuffer(requestBody))
+	preconditionNoError(err)
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute render request: %w", err)
+	}
+	//goland:noinspection GoUnhandledErrorResult
+	defer resp.Body.Close()
+	jsonDecoder := json.NewDecoder(resp.Body)
+	renderResult := tgsRenderResult{}
+	err = jsonDecoder.Decode(&renderResult)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode render response: %w", err)
+	}
+	if renderResult.Error != nil {
+		return nil, fmt.Errorf("failed to render: %v", renderResult.Error)
+	}
+
+	return renderResult.GifData, nil
+}
+
 func (s *Service) getTelegramStickerData(sticker *tb.Sticker) ([]byte, error) {
 	if data := s.lookupTelegramStickerInCache(sticker); data != nil {
 		return data, nil
@@ -707,17 +787,19 @@ func (s *Service) getTelegramStickerData(sticker *tb.Sticker) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read data: %v", err)
 	}
 
+	if sticker.Animated {
+		data, err = s.convertTgsToGif(data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert tgs to gif: %w", err)
+		}
+	}
+
 	go s.storeTelegramStickerToCache(sticker, data)
 
 	return data, nil
 }
 
 func (s *Service) handleTelegramStickerMessage(m *tb.Message) {
-	if m.Sticker.Animated {
-		s.logger.Warningf("qq doesn't support animated sticker")
-		return
-	}
-
 	imageChan := make(chan *qqGroupImageElementOrError)
 
 	fetchSticker := func() {
