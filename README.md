@@ -21,7 +21,7 @@ The purpose of this project is to forward messages between a `qq` group and a `t
 - [x] Recall messages from both `telegram` and `qq`
 - [x] Forward telegram static stickers(including `gif`s)
 - [x] Forward telegram tgs/animated stickers
-
+- [ ] Relpy to forwarded messages (wip)
 ## Troubleshooting
 
 * The program always fails to send (text) messages to qq:
