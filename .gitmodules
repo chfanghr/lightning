@@ -1,0 +1,3 @@
+[submodule "rlottie-to-gif-api"]
+	path = rlottie-to-gif-api
+	url = https://github.com/chfanghr/rlottie-to-gif-api.git
